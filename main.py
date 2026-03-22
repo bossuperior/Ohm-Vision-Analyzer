@@ -2,7 +2,7 @@ import cv2
 # Import โมดูลที่เราเขียนไว้ทั้งหมด
 from src.utils.img_reader import img_reader
 from src.vision.color_reader import scan_bands_statistical
-from src.vision.cal_resistance import calculate_resistance
+from src.analyzer.cal_resistance import calculate_resistance
 from src.topology.grid_mapper import extract_components_coordinates
 from src.topology.graph_builder import CircuitGraph
 from src.analyzer.solver import solve_total_resistance
