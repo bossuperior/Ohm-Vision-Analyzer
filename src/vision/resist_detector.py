@@ -44,8 +44,21 @@ def detect_bands_projection(roi):
         band_centers.append({'x': center_x, 'w': w_cnt})
 
     band_centers.sort(key=lambda k: k['x'])
-    return band_centers
 
+    # [เพิ่ม Fallback ตรงนี้] 
+    # ถ้า Image Processing ทำงานพลาด (เจอแสงสะท้อนหนักๆ จน Contour หาย)
+    if len(band_centers) < 3:
+        print(" [Warning] Contours fail. Using Statistical Fallback...")
+        # สมมติ padding = 0 สำหรับ roi ที่ตัดมาพอดี
+        true_length = w 
+        band_centers = [
+            {'x': int(true_length * 0.23), 'w': int(true_length * 0.05)},
+            {'x': int(true_length * 0.38), 'w': int(true_length * 0.05)},
+            {'x': int(true_length * 0.53), 'w': int(true_length * 0.05)},
+            {'x': int(true_length * 0.77), 'w': int(true_length * 0.05)}
+        ]
+
+    return band_centers
 
 def scan_bands_using_projection(roi):
     band_locs = detect_bands_projection(roi)

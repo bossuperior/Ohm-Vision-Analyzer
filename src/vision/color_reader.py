@@ -109,10 +109,14 @@ def white_balance(img):
     
     return cv2.merge([b, g, r])
 
-def extract_color_bands(warped_img, num_bands_expected=4):
+def extract_color_bands(warped_img, num_bands_expected=4,padding=0):
     """
     หั่นภาพตัวต้านทานเป็นส่วนๆ เพื่อสกัดสี HSV
     """
+    if padding > 0:
+        h, w = warped_img.shape[:2]
+        # หั่นขอบซ้าย-ขวา และ บน-ล่าง ออก
+        warped_img = warped_img[padding:h-padding, padding:w-padding]
     # 1. ทำ White Balance ก่อนเพื่อความแม่นยำของสี
     wb_img = white_balance(warped_img)
 
