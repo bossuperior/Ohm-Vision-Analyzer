@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-def resist_body_detector(frame):
+def cv_body_detector(frame):
     process_frame = frame.copy()
 
     #Filterout breadboard background by HSV thresholding (เบรดบอร์ดจะมีสีอิ่มตัวต่ำและสว่างพอสมควร)

@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import tkinter as tk
 from src.topology.grid_mapper import draw_grid, topology_click
-from src.vision.resist_body_detector import resist_body_detector
+from vision.cv_body_detector import cv_body_detector
 
 click_points = []
 # 5.4 cm = 54 mm -> 540 px
@@ -76,7 +76,7 @@ def camera():
                 ], dtype="float32")              
                 matrix = cv2.getPerspectiveTransform(ordered_pts, dst_pts)
                 crop_board = cv2.warpPerspective(clean_frame, matrix, (target_w, target_h))
-                rois, boxes, debug_mask = resist_body_detector(crop_board)
+                rois, boxes, debug_mask = cv_body_detector(crop_board)
                 grid_board = draw_grid(crop_board, target_w, target_h)
                 for (x, y, w, h) in boxes:
                     cv2.rectangle(grid_board, (x, y), (x + w, y + h), (255, 0, 255), 2) # สีม่วงแดง

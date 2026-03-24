@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from vision.resist_band_detector import detect_bands_projection,closest_color, COLOR_VALS
+from vision.band_detector import detect_bands_projection,closest_color, COLOR_VALS
 
 def scan_bands_using_projection(roi):
     band_locs = detect_bands_projection(roi)
