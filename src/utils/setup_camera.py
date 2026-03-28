@@ -3,8 +3,7 @@ import tkinter as tk
 import cv2
 import numpy as np
 
-from src.topology.grid_mapper import draw_grid
-from src.vision.cv_body_detector import cv_body_detector
+from src.utils.ui_handlers import close_window_btn
 
 # 5.4 cm = 54 mm -> 540 px
 # 8.1 cm = 81 mm -> 810 px
@@ -14,14 +13,6 @@ BOARD_HEIGHT = 810
 cap = cv2.VideoCapture(1, cv2.CAP_DSHOW)
 cv2.namedWindow('Camera')
 root = tk.Tk()
-
-
-def close_window():
-    if cap.isOpened():
-        cap.release()
-    cv2.destroyAllWindows()
-    root.destroy()
-
 
 def order_points(pts):
     pts = np.array(pts, dtype="float32")
@@ -99,7 +90,7 @@ def camera():
 def setup_camera():
     root.title("Control Panel")
     root.geometry("200x100")
-    close_button = tk.Button(root, text="Close Camera", command=close_window, bg="red", fg="white", font=("Arial", 12))
+    close_button = tk.Button(root, text="Close Camera", command=close_window_btn, bg="red", fg="white", font=("Arial", 12))
     close_button.pack(expand=True, fill='both', padx=20, pady=20)
     camera()
     root.mainloop()

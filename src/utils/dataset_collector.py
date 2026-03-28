@@ -1,32 +1,91 @@
 import cv2
+import tkinter as tk
 import os
+from PIL import Image, ImageTk
 
-SAVE_DIR = "../data/raw/dataset_capture"
-os.makedirs(SAVE_DIR, exist_ok=True)
+class DataCollectorApp:
+    def __init__(self, window, window_title, video_source=1):
+        self.window = window
+        self.window.title(window_title)
+        self.window.geometry("400x500")
+        self.video_source = video_source
 
-cap = cv2.VideoCapture(1, cv2.CAP_DSHOW)
-existing_files = os.listdir(SAVE_DIR)
-count = len([f for f in existing_files if f.endswith('.jpg')])
+        current_file_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(os.path.dirname(current_file_dir))
+        self.save_dir = os.path.join(project_root, "data", "raw", "dataset_capture")
+        os.makedirs(self.save_dir, exist_ok=True)
 
-print(f"📁 Save Location: {SAVE_DIR}")
-print(f"🔢 Starting at image number: {count + 1}")
-print("Press 'Spacebar' to capture | Press 'q' to quit")
+        self.vid = cv2.VideoCapture(self.video_source, cv2.CAP_DSHOW)
+        if not self.vid.isOpened():
+            print("⚠️ Camera not opened!")
 
-while True:
-    ret, frame = cap.read()
-    if not ret: break
+        self.create_widgets()
+        #Live Preview
+        self.update_frame()
 
-    cv2.imshow("Data Collector", frame)
-    key = cv2.waitKey(1) & 0xFF
+        # Close Event
+        self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.window.bind('<space>', lambda e: self.capture_image())
 
-    if key == ord(' '):
-        count += 1
-        filename = os.path.join(SAVE_DIR, f"img_{count:03d}.jpg")
-        cv2.imwrite(filename, frame)
-        print(f"📸 Captured: {filename}")
+    def create_widgets(self):
+        self.header = tk.Label(self.window, text="Ohm-Vision Data Collector", font=("Arial", 20, "bold"))
+        self.header.pack(pady=10)
 
-    elif key == ord('q'):
-        break
+        # Live Preview
+        self.canvas = tk.Canvas(self.window, bg="black", highlightthickness=0)
+        self.canvas.pack(pady=5, expand=True, fill="both")
 
-cap.release()
-cv2.destroyAllWindows()
+        self.status_label = tk.Label(self.window, text="Ready...", fg="blue", font=("Arial", 10))
+        self.status_label.pack(pady=5)
+
+        self.btn_frame = tk.Frame(self.window)
+        self.btn_frame.pack(pady=20)
+
+        self.btn_capture = tk.Button(
+            self.window, text="📸 Capture Image (Space)",
+            command=self.capture_image,
+            bg="#4CAF50", fg="white", font=("Arial", 12, "bold"),
+            width=20, height=2
+        )
+        self.btn_capture.pack(pady=10)
+
+        self.btn_close = tk.Button(
+            self.window, text="❌ Close System",
+            command=self.on_closing,
+            bg="#f44336", fg="white", width=15
+        )
+        self.btn_close.pack(pady=5)
+
+    def update_frame(self):
+        ret, frame = self.vid.read()
+        if ret:
+            canvas_width = self.canvas.winfo_width()
+            canvas_height = self.canvas.winfo_height()
+
+            if canvas_width > 1 and canvas_height > 1:
+                frame_resized = cv2.resize(frame, (canvas_width, canvas_height))
+                self.frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+                self.photo = ImageTk.PhotoImage(image=Image.fromarray(self.frame))
+                self.canvas.create_image(0, 0, image=self.photo, anchor=tk.NW)
+
+        self.window.after(15, self.update_frame)
+
+    def capture_image(self):
+        ret, frame = self.vid.read()
+        if ret:
+            count = len([f for f in os.listdir(self.save_dir) if f.endswith('.jpg')]) + 1
+            filename = os.path.join(self.save_dir, f"img_{count:03d}.jpg")
+            cv2.imwrite(filename, frame)
+
+            self.status_label.config(text=f"✅ Saved: img_{count:03d}.jpg", fg="green")
+            print(f"📸 Captured: {filename}")
+
+    def on_closing(self):
+        if self.vid.isOpened():
+            self.vid.release()
+        self.window.destroy()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = DataCollectorApp(root, "Ohm Vision OOP Collector", video_source=1)
+    root.mainloop()
