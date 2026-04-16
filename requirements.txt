@@ -1,4 +1,14 @@
-pillow
+# --- Core Computer Vision ---
+ultralytics
 opencv-python
 numpy
+
+# --- Topology & Circuit Analysis ---
 networkx
+
+# --- AI Optimization & Inference ---
+onnx
+onnxruntime
+onnxslim
+torch
+torchvision

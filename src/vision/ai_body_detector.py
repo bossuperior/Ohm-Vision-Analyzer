@@ -3,7 +3,7 @@ import numpy as np
 from ultralytics import YOLO
 
 class AIBodyDetector:
-    def __init__(self, model_path="models/best.pt"):
+    def __init__(self, model_path="models/Yolo_v8n_pose_weights.pt"):
         try:
             self.model = YOLO(model_path)
             print(f"✅ AI Ready! โหลดโมเดลสำเร็จจาก: {model_path}")
