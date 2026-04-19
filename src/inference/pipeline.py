@@ -2,8 +2,8 @@ import cv2
 import numpy as np
 
 # Import all your modular tools
-from src.utils.camera_loader import CameraLoader
-from src.utils.point_smoother import PointSmoother
+from vision.camera_loader import CameraLoader
+from vision.point_smoother import PointSmoother
 from src.inference.model_engine import PoseModel  # Your selected engine (YOLO/RTM/HRNet)
 from src.vision.perspective_transform import img_transform
 from src.vision.band_reader import BandReader

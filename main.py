@@ -1,7 +1,7 @@
 import tkinter as tk
 from src.inference.model_engine import YOLOPoseEngine
 from src.inference.pipeline import IntelligentBreadboardPipeline
-from src.utils.camera_loader import CameraLoader
+from vision.camera_loader import CameraLoader
 
 
 class App:

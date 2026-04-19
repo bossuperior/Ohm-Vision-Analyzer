@@ -12,3 +12,6 @@ onnxruntime
 onnxslim
 torch
 torchvision
+
+#---Augmentation & Dataset Management---
+albumentations
