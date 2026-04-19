@@ -4,8 +4,6 @@ import time
 
 
 class CameraLoader:
-    """Handles webcam hardware on a dedicated background thread for zero-lag I/O."""
-
     def __init__(self, camera_id=0, width=640, height=480):
         self.camera_id = camera_id
         self.width = width
@@ -51,13 +49,11 @@ class CameraLoader:
                 time.sleep(0.01)
 
     def get_frame(self):
-        """Instantly returns the most recent frame from memory."""
         if not self.ret or self.frame is None:
             return False, None
         return self.ret, self.frame.copy()
 
     def stop(self):
-        """Safely shuts down the thread and hardware."""
         self.is_running = False
         if self.thread is not None:
             self.thread.join()  # Wait for thread to finish
