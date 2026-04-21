@@ -1,10 +1,11 @@
 import cv2
 import numpy as np
 import time
+from collections import Counter, deque
 from src.vision.camera_loader import CameraLoader
 from src.inference.model_engine import ModelEngine
 from src.vision.perspective_transform import PerspectiveTransformer, PointSmoother
-from src.vision.resist_body_detector import BodyDetector
+from src.vision.resist_body_detector import BodyDetector, TemporalFilter
 from src.vision.band_reader import BandReader
 from src.vision.band_detector import BandDetector
 from src.topology.circuit_detector import CircuitDetector
@@ -30,6 +31,9 @@ def main():
     point_smoother = PointSmoother()
     grid_mapper = GridMapper()
 
+    temporal_filter = TemporalFilter(history_size=7)
+    circuit_history = deque(maxlen=10)
+    resistance_history = deque(maxlen=10)
 
     camera.start()
     time.sleep(1)
@@ -46,7 +50,6 @@ def main():
 
             # Send the frame to the Model Engine for inference
             detection_results = engine.predict(frame)
-            
             display_frame = frame.copy()
 
             # Check if we detected the board
@@ -57,7 +60,7 @@ def main():
                 warped_board, matrix = transformer.warp(frame, stable_corners)
                 display_frame = warped_board.copy()
 
-                display_frame = grid_mapper.draw_grid_overlay(display_frame)
+                # display_frame = grid_mapper.draw_grid_overlay(display_frame)
 
                 board_results = engine.predict(warped_board)
 
@@ -66,19 +69,27 @@ def main():
                 
                 detected_ohms = []
                 resistor_indices = np.where(board_results.class_ids == 1)[0]
-                for res in resistors:
+                for draw_idx, res in enumerate(resistors):
                     # Read the color bands from the cropped resistor image and calculate the Ohm value
                     resistance_str, bands, total_ohms = band_reader.calculate(res.image_crop)
                     global_id = resistor_indices[res.id] if res.id < len(resistor_indices) else res.id
+                    resistance_str, total_ohms = temporal_filter.update_and_get(global_id, resistance_str, total_ohms)
                     detected_ohms.append({
                         "id": global_id,
-                        "string_val": resistance_str, 
-                        "numeric_val": total_ohms,   
+                        "string_val": resistance_str,
+                        "numeric_val": total_ohms,
                         "keypoints": res.keypoints
                     })
-                    
-                    # Draw the detected resistor and its value on the display frame
-                    cv2.putText(display_frame, resistance_str, res.text_position, cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+                    # Offset each label by draw_idx rows to prevent overlap when boxes cluster
+                    tx, ty = res.text_position
+                    label_pos = (tx, max(10, ty - draw_idx * 40))
+                    cv2.putText(display_frame, resistance_str, label_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+                    # Debug: show raw detected band colors so you can tune REF_COLORS
+                    band_colors = " | ".join(b['color'] for b in bands) if bands else "no bands"
+                    debug_pos = (tx, min(display_frame.shape[0] - 10, label_pos[1] + 20))
+                    cv2.putText(display_frame, band_colors, debug_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 255), 1)
 
                 component_data = []
                 for i in range(len(board_results.boxes)):
@@ -91,13 +102,64 @@ def main():
                 #Mapping detected components to the breadboard grid and determining their electrical nodes
                 mapped_components = grid_mapper.map_to_holes(component_data)
                 circuit_type, G, total_r = circuit_detector.analyze_topology(mapped_components, detected_ohms)
-                
-                cv2.putText(display_frame, f"Topology: {circuit_type}", (20, 40), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 0, 255), 2)
-                if total_r > 0 and total_r != float('inf'):
-                    cv2.putText(display_frame, f"R Total: {total_r} Ohms", (20, 70), cv2.FONT_HERSHEY_DUPLEX, 0.8, (0, 255, 255), 2)
-                elif total_r == float('inf'):
-                    cv2.putText(display_frame, f"R Total: OPEN CIRCUIT", (20, 70), cv2.FONT_HERSHEY_DUPLEX, 0.8, (0, 0, 255), 2)
 
+                # ========================
+                # Temporal Smoothing Logic
+                # ========================
+                if circuit_type is not None:
+                    circuit_history.append(circuit_type)
+                    resistance_history.append(total_r)
+
+                # --- Circuit Voting ---
+                if len(circuit_history) >= 3:
+                    stable_circuit_type = Counter(circuit_history).most_common(1)[0][0]
+                else:
+                    stable_circuit_type = circuit_type if circuit_type is not None else "UNKNOWN"
+
+                # --- Resistance Voting ---
+                inf_count = sum(1 for r in resistance_history if r == float('inf'))
+
+                if inf_count > len(resistance_history) / 2:
+                    stable_r = float('inf')
+                else:
+                    clean_r = [round(r, 1) for r in resistance_history if r != float('inf')]
+                    stable_r = Counter(clean_r).most_common(1)[0][0] if clean_r else float('inf')
+
+                cv2.putText(display_frame,
+                            f"Topology: {stable_circuit_type}",
+                            (20, 40),
+                            cv2.FONT_HERSHEY_DUPLEX,
+                            0.8,
+                            (255, 0, 255),
+                            2)
+
+                if stable_r > 0 and stable_r != float('inf'):
+                    cv2.putText(display_frame,
+                                f"R Total: {stable_r} Ohms",
+                                (20, 70),
+                                cv2.FONT_HERSHEY_DUPLEX,
+                                0.8,
+                                (0, 255, 255),
+                                2)
+
+                elif stable_r == float('inf'):
+                    cv2.putText(display_frame,
+                                f"R Total: OPEN CIRCUIT",
+                                (20, 70),
+                                cv2.FONT_HERSHEY_DUPLEX,
+                                0.8,
+                                (0, 0, 255),
+                                2)
+            else:
+                circuit_history.append("NO BOARD")
+                resistance_history.append(float('inf'))
+                cv2.putText(display_frame,
+                            "NO BOARD DETECTED",
+                            (20, 110),
+                            cv2.FONT_HERSHEY_DUPLEX,
+                            0.8,
+                            (0, 0, 255),
+                            2)
             # ===============================
             # PHASE 3: Display & Exit Control
             # ===============================

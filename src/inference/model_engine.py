@@ -1,12 +1,12 @@
-import cv2
 import numpy as np
 from ultralytics import YOLO
 
 class DetectionResult: #Result Data Structure
-    def __init__(self, boxes, keypoints, class_ids):
+    def __init__(self, boxes, keypoints, class_ids, scores=None):
         self.boxes = boxes
         self.keypoints = keypoints
         self.class_ids = class_ids
+        self.scores = scores if scores is not None else np.ones(len(class_ids))
 
     def has_board(self):
         # Check if any detected object is the board (class_id == 0)
@@ -46,14 +46,14 @@ class ModelEngine:
     # 1. YOLOv8 POSE ONNX ENGINE
     # --------------------------
     def _predict_yolo(self, frame):
-        results = self.engine(frame, verbose=False)[0]
+        results = self.engine(frame, verbose=False, conf=0.3, iou=0.45)[0]
         
-        # Extract boxes, keypoints, and class IDs from the results
-        boxes = results.boxes.xyxy.cpu().numpy() if results.boxes else np.array([])
-        class_ids = results.boxes.cls.cpu().numpy() if results.boxes else np.array([])
+        boxes     = results.boxes.xyxy.cpu().numpy()  if results.boxes     else np.array([])
+        class_ids = results.boxes.cls.cpu().numpy()   if results.boxes     else np.array([])
+        scores    = results.boxes.conf.cpu().numpy()  if results.boxes     else np.array([])
         keypoints = results.keypoints.xy.cpu().numpy() if results.keypoints else np.array([])
-        
-        return DetectionResult(boxes, keypoints, class_ids)
+
+        return DetectionResult(boxes, keypoints, class_ids, scores)
 
     # -----------------------
     # 2. RTM-POSE ONNX ENGINE

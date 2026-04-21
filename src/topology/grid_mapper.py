@@ -11,8 +11,7 @@ class GridMapper:
         self.offset_x = offset_x
         self.offset_y = offset_y
         self.cols = 30
-        
-        # 🌟 THE PITCH MAP (ไร้ขั้ว ไร้ตัวอักษร สนใจแค่ Node ทางกายภาพ)
+
         self.y_pitch_map = {
             0: ("Rail_A", "Power_Top"),    
             1: ("Rail_B", "Power_Top"),     
@@ -72,27 +71,25 @@ class GridMapper:
             
         return hole_id, electrical_node, (snapped_x, snapped_y)
 
-    def map_to_holes(self, component_data: dict) -> List[Dict]:
+    def map_to_holes(self, component_data: List[Dict]) -> List[Dict]:
         mapped_components = []
 
-        if 'keypoints' not in component_data or len(component_data['keypoints']) == 0:
-            return mapped_components
-
-        for i, kpts in enumerate(component_data['keypoints']):
-            if len(kpts) >= 2:
-                leg1_x, leg1_y = kpts[0][:2]
-                leg2_x, leg2_y = kpts[1][:2]
-                hole1, elec1, snap1 = self.map_pixel_to_node(leg1_x, leg1_y)
-                hole2, elec2, snap2 = self.map_pixel_to_node(leg2_x, leg2_y)
-
-                mapped_components.append({
-                    'id': i,
-                    'node1': elec1,          
-                    'node2': elec2,
-                    'hole1_name': hole1,    
-                    'hole2_name': hole2,
-                    'snapped_points': [snap1, snap2]
-                })
+        for comp in component_data:
+            kpts = comp.get('keypoints', [])
+            if len(kpts) < 2:
+                continue
+            leg1_x, leg1_y = kpts[0][:2]
+            leg2_x, leg2_y = kpts[1][:2]
+            hole1, elec1, snap1 = self.map_pixel_to_node(leg1_x, leg1_y)
+            hole2, elec2, snap2 = self.map_pixel_to_node(leg2_x, leg2_y)
+            mapped_components.append({
+                'id': comp['id'],
+                'node1': elec1,
+                'node2': elec2,
+                'hole1_name': hole1,
+                'hole2_name': hole2,
+                'snapped_points': [snap1, snap2]
+            })
 
         return mapped_components
 

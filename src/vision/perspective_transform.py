@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 
+
 class PointSmoother:
     def __init__(self, alpha: float = 0.15, reset_threshold: float = 50.0):
         self.alpha = alpha
@@ -31,13 +32,14 @@ class PointSmoother:
     def reset(self):
         self.previous_points = None
 
+
 class PerspectiveTransformer:
     def __init__(self):
         pass
 
-    def order_points(self,pts):
+    def order_points(self, pts):
         pts = np.array(pts, dtype="float32")
-        #Sort the points based on their angle from the center to ensure consistent ordering
+        # Sort the points based on their angle from the center to ensure consistent ordering
         center = np.mean(pts, axis=0)
         angles = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
         sorted_pts = pts[np.argsort(angles)]
@@ -45,8 +47,8 @@ class PerspectiveTransformer:
         tl_index = np.argmin(s)
         # Returns [Top-Left, Top-Right, Bottom-Right, Bottom-Left]
         return np.roll(sorted_pts, -tl_index, axis=0)
-    
-    def warp(self,image, pts):
+
+    def warp(self, image, pts):
         rect = self.order_points(pts)
         (tl, tr, br, bl) = rect
 

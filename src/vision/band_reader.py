@@ -5,35 +5,66 @@ from src.vision.band_detector import BandDetector
 from src.vision.color_mapping import COLOR_VALS
 
 class BandReader:
-    def __init__(self, y_start_pct: float = 0.15, y_end_pct: float = 0.35):
+    def __init__(self, y_start_pct: float = 0.30, y_end_pct: float = 0.70):
         # Configurable sample region to avoid cylindrical glare.
         self.y_start_pct = y_start_pct
         self.y_end_pct = y_end_pct
         self.detector = BandDetector()
+
+    def _shrink_roi(self, img: np.ndarray) -> np.ndarray:
+        h, w = img.shape[:2]
+        x1 = int(w * 0.15)
+        x2 = int(w * 0.85)
+        y1 = int(h * 0.05)
+        y2 = int(h * 0.95)
+
+        if x2 <= x1 or y2 <= y1:
+            return img
+        return img[y1:y2, x1:x2]
+
+    def _awb(self, img: np.ndarray) -> np.ndarray:
+        result = img.astype(np.float32)
+        avg_b = np.mean(result[:, :, 0])
+        avg_g = np.mean(result[:, :, 1])
+        avg_r = np.mean(result[:, :, 2])
+        avg_all = (avg_b + avg_g + avg_r) / 3.0
+
+        if avg_b > 0 and avg_g > 0 and avg_r > 0:
+            result[:, :, 0] = np.clip(result[:, :, 0] * (avg_all / avg_b), 0, 255)
+            result[:, :, 1] = np.clip(result[:, :, 1] * (avg_all / avg_g), 0, 255)
+            result[:, :, 2] = np.clip(result[:, :, 2] * (avg_all / avg_r), 0, 255)
+        return result.astype(np.uint8)
 
     def calculate(self, cropped_resistor: np.ndarray) -> Tuple[str, List[Dict], float]:
         """
         Public entry point. Scans bands and returns the string value and raw data.
         Returns: ("1.50k Ohms 5%", [{'color': 'BROWN'...}, ...])
         """
-        band_detector = BandDetector()
-        bands = self._scan_bands(cropped_resistor)
+        cleaned_roi = self._shrink_roi(cropped_resistor)
+        cleaned_roi = self._awb(cleaned_roi)
+        bands = self._scan_bands(cleaned_roi)
 
         if not bands:
             return "Unknown", [],0.0
-        bands = band_detector.fix_false_colors(bands)
+        bands = self.detector.fix_false_colors(bands)
         resistance_str, bands, total_ohms = self._calculate_ohms(bands)
         return resistance_str, bands, total_ohms
 
     def _scan_bands(self, roi: np.ndarray) -> List[Dict]:
-        #Extract band colors from the cropped resistor image (Region of Interest) and return a list of detected bands with their colors and positions
-        band_locs = self.detector.detect_bands_projection(roi)
-        detected_bands = []
+        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        roi_balanced = cv2.merge((l, a, b))
+        roi_bright = cv2.cvtColor(roi_balanced, cv2.COLOR_LAB2BGR)
 
+        #Extract band colors from the cropped resistor image (Region of Interest) and return a list of detected bands with their colors and positions
+        band_locs = self.detector.detect_bands_projection(roi_bright)
+        detected_bands = []
         if not band_locs:
             return detected_bands
 
-        hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        hsv_roi = cv2.cvtColor(roi_bright, cv2.COLOR_BGR2HSV)
         h, w = roi.shape[:2]
         y1, y2 = int(h * self.y_start_pct), int(h * self.y_end_pct)
 
@@ -116,13 +147,17 @@ class BandReader:
 
             total_ohms = ((digit1 * 10) + digit2) * multiplier
 
+            # Reject physically impossible values for common breadboard resistors
+            if total_ohms <= 0 or total_ohms > 10e6:
+                return "Read Error", bands, 0.0
+
             # 5. Format Output
             if total_ohms >= 1e6:
-                formatted_str = f"{total_ohms / 1e6:.2f}M Ohms ±{tolerance}"
+                formatted_str = f"{total_ohms / 1e6:.2f}M Ohms +/-{tolerance}"
             elif total_ohms >= 1e3:
-                formatted_str = f"{total_ohms / 1e3:.2f}k Ohms ±{tolerance}"
+                formatted_str = f"{total_ohms / 1e3:.2f}k Ohms +/-{tolerance}"
             else:
-                formatted_str = f"{total_ohms:.1f} Ohms ±{tolerance}"
+                formatted_str = f"{total_ohms:.1f} Ohms +/-{tolerance}"
             
             return formatted_str, bands, total_ohms
 

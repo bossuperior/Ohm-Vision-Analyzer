@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from src.vision.color_mapping import REF_COLORS
+from src.vision.color_mapping import REF_COLORS, COLOR_VALS
 
 class BandDetector:
     def __init__(self):
@@ -34,38 +34,25 @@ class BandDetector:
                 best_color = name
         return best_color
 
-    def fix_false_colors(self,bands):
+    def fix_false_colors(self, bands):
         if not bands: return bands
-        for i, band in enumerate(bands):
-            h, s, v = band['mean_hsv']
-            color = band['color']
 
-            #Fix Lighting & Saturation Issues
-            if color == 'GOLD':
-                if s > 130:
-                    band['color'] = 'RED'; band['val'] = 2
-                elif v < 100:
-                    band['color'] = 'BROWN'; band['val'] = 1
-            if color == 'BROWN' and s > 150:
-                band['color'] = 'RED'; band['val'] = 2
-            #Hue Shift Override
-            if i < 2 and color in ['YELLOW', 'GREEN', 'BLUE']:
-                if s > 80 and v > 80:
-                    band['color'] = 'RED'; band['val'] = 2
+        # Very high saturation "GOLD" is actually ORANGE (metallic gold has low S)
+        for band in bands:
+            if band['color'] == 'GOLD' and band['mean_hsv'][1] > 185:
+                band['color'] = 'ORANGE'
+                band['val'] = COLOR_VALS['ORANGE']
 
-        #Handle cases where first bands are misread as GOLD/SILVER due to lighting
+        # Tolerance bands (GOLD/SILVER) are never digit bands — fix reading direction
         if bands[0]['color'] in ['GOLD', 'SILVER']:
-            bands[0]['color'] = 'RED'; bands[0]['val'] = 2
-        if len(bands) >= 2 and bands[1]['color'] in ['GOLD', 'SILVER']:
-            bands[1]['color'] = 'RED'; bands[1]['val'] = 2
-        last_band = bands[-1]
+            bands.reverse()
 
-        #Tolerance Band Correction for Red/Gold/Orange
-        is_vivid_red = (last_band['mean_hsv'][1] > 100)
-        if len(bands) == 3 and last_band['color'] == 'RED' and is_vivid_red:
-            pass
-        elif last_band['color'] in ['RED', 'ORANGE', 'BROWN']:
-            last_band['color'] = 'GOLD'; last_band['val'] = -1
+        # GOLD is not a valid digit (val=-1 makes no sense as a digit) —
+        # cameras desaturate yellow bands until they land in GOLD's HSV zone
+        if bands[0]['color'] == 'GOLD':
+            bands[0]['color'] = 'YELLOW'
+            bands[0]['val'] = COLOR_VALS['YELLOW']
+
         return bands
 
     def detect_bands_projection(self,roi):
@@ -75,9 +62,6 @@ class BandDetector:
         #l = Lightness channel for better contrast, a and b for color info
         l, a, b = cv2.split(lab)
 
-        #Apply CLAHE to enhance contrast, especially for low-light or faded bands
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        l = clahe.apply(l)
         roi_balanced = cv2.merge((l, a, b))
         roi_balanced = cv2.cvtColor(roi_balanced, cv2.COLOR_LAB2BGR)
 

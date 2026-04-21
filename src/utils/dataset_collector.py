@@ -79,8 +79,8 @@ class DataCollectorApp:
             filename = os.path.join(self.save_dir, f"img_{count:03d}.jpg")
             cv2.imwrite(filename, frame)
 
-            self.status_label.config(text=f"✅ Saved: img_{count:03d}.jpg", fg="green")
-            print(f"📸 Captured: {filename}")
+            self.status_label.config(text=f" Saved: img_{count:03d}.jpg", fg="green")
+            print(f" Captured: {filename}")
 
     def on_closing(self):
         if self.vid.isOpened():

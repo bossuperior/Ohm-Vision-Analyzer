@@ -23,8 +23,13 @@ class CircuitDetector:
         # 1. Build the raw physical graph
         G = self._build_raw_graph(mapped_components, resistor_values)
 
+        G = self._clean_graph(G)
+
         # 2. Collapse jumper wires (merge nodes) to create the true logical schematic
         G = self._collapse_wires(G)
+
+        if G.number_of_edges() == 0:
+            return "Open Circuit", G, 0.0
 
         # 3. Detect Topology (Series, Parallel, Wheatstone, Complex)
         circuit_type = self._classify_topology(G)
@@ -39,13 +44,14 @@ class CircuitDetector:
         end_node = next((n for n in possible_ends if G.has_node(n)), None)
         
         total_r = 0.0 
-        
-        # ถ้าเจอทั้งจุดเริ่มต้นและจุดสิ้นสุด ให้รันคณิตศาสตร์หา R รวม
+
         if start_node and end_node:
-            total_r = calculator.calculate(G, start_node, end_node)
+            if nx.has_path(G, start_node, end_node):
+                total_r = calculator.calculate(G, start_node, end_node)
+            else:
+                circuit_type = "Disconnected / Circuit Broken"
+                total_r = float('inf') #Infinity Resistance
         elif G.number_of_nodes() > 0 and circuit_type != "Open Circuit":
-            # กรณีผู้ใช้ไม่ได้ต่อลงรางไฟเลย (ต่อลอยๆ กลางบอร์ด) 
-            # เราสามารถดึงโหนดที่อยู่ซ้ายสุด-ขวาสุด มาคำนวณแก้ขัดได้ครับ (ถ้าต้องการ)
             pass
 
         return circuit_type, G, total_r
@@ -78,20 +84,33 @@ class CircuitDetector:
 
         return G
 
+    def _clean_graph(self, G: nx.MultiGraph) -> nx.MultiGraph:
+        loops = list(nx.selfloop_edges(G, keys=True))
+        G.remove_edges_from(loops)
+        isolates = list(nx.isolates(G))
+        G.remove_nodes_from(isolates)
+
+        return G
+
     def _collapse_wires(self, G: nx.MultiGraph) -> nx.MultiGraph:
         """
         Critical Logical Step:
         Finds all edges that are 'wires' and merges their endpoint nodes.
         This transforms physical breadboard geography into a logical schematic.
         """
+        wire_graph = nx.Graph()
+        wire_graph.add_nodes_from(G.nodes())
         # We iterate over a copy of the edges to safely modify the graph
-        wire_edges = [(u, v, k) for u, v, k, data in G.edges(keys=True, data=True) if data.get('type') == 'wire']
+        wire_edges = [(u, v) for u, v, k, data in G.edges(keys=True, data=True) if data.get('type') == 'wire']
+        wire_graph.add_edges_from(wire_edges)
 
-        for u, v, k in wire_edges:
-            if G.has_node(u) and G.has_node(v) and u != v:
-                # Contract node v into node u.
-                # All resistors connected to v will automatically re-route to connect to u!
-                G = nx.contracted_nodes(G, u, v, self_loops=False)
+        for component in nx.connected_components(wire_graph):
+            nodes = list(component)
+            if len(nodes) > 1:
+                master_node = nodes[0]
+                for other_node in nodes[1:]:
+                    if G.has_node(master_node) and G.has_node(other_node):
+                        G = nx.contracted_nodes(G, master_node, other_node, self_loops=False)
 
         return G
 
