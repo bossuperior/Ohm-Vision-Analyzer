@@ -1,124 +1,117 @@
-import cv2
 import numpy as np
-from typing import List, Dict, Tuple
-
+import cv2
+from typing import Tuple, List, Dict
 
 class GridMapper:
-    """
-    Translates pixel coordinates from the cropped breadboard image
-    into logical electrical nodes (e.g., 'Row_5_Top', 'Power_Top_Plus').
-    """
+    def __init__(self, target_w: int = 810, target_h: int = 540, offset_x: int = 45, offset_y: int = 40):
+        self.target_w = target_w
+        self.target_h = target_h
+        
+        # Offset from board edges to the first hole
+        self.offset_x = offset_x
+        self.offset_y = offset_y
+        self.cols = 30
+        
+        # 🌟 THE PITCH MAP (ไร้ขั้ว ไร้ตัวอักษร สนใจแค่ Node ทางกายภาพ)
+        self.y_pitch_map = {
+            0: ("Rail_A", "Power_Top"),    
+            1: ("Rail_B", "Power_Top"),     
+            3: ("Hole", "Terminal_Top"),
+            4: ("Hole", "Terminal_Top"),
+            5: ("Hole", "Terminal_Top"),
+            6: ("Hole", "Terminal_Top"),
+            7: ("Hole", "Terminal_Top"),
+            10: ("Hole", "Terminal_Bottom"),
+            11: ("Hole", "Terminal_Bottom"),
+            12: ("Hole", "Terminal_Bottom"),
+            13: ("Hole", "Terminal_Bottom"),
+            14: ("Hole", "Terminal_Bottom"),
+            16: ("Rail_C", "Power_Bottom"),
+            17: ("Rail_D", "Power_Bottom") 
+        }
+        
+        # Calculate the pitch (distance between holes)
+        self.pitch_x = (self.target_w - 2 * self.offset_x) / (self.cols - 1)
+        self.pitch_y = (self.target_h - 2 * self.offset_y) / 17.0
 
-    def __init__(self, total_rows: int = 30, offset_length: int = 35, offset_width: int = 40):
-        # Configuration parameters
-        self.total_rows = total_rows
-        self.offset_length = offset_length
-        self.offset_width = offset_width
+    def _get_nearest_y_pitch(self, y_unit: float) -> int:
+        valid_pitches = list(self.y_pitch_map.keys())
+        return min(valid_pitches, key=lambda p: abs(p - y_unit))
 
-        # Ratios defining the zones on a standard 400-tie point breadboard
-        self.terminal_top_ratio = 0.18
-        self.terminal_bottom_ratio = 0.82
-        self.rails_top_ratio = 0.35
-        self.rails_bottom_ratio = 0.65
+    def map_pixel_to_node(self, x: float, y: float) -> Tuple[str, str, Tuple[int, int]]:
+        # Find Column X
+        col_idx = int(round((x - self.offset_x) / self.pitch_x))
+        col_idx = max(0, min(col_idx, self.cols - 1))
+        col_num = col_idx + 1 
+        
+        # Find Row Y and Zone
+        y_unit = (y - self.offset_y) / self.pitch_y
+        nearest_pitch = self._get_nearest_y_pitch(y_unit)
+        label, zone = self.y_pitch_map[nearest_pitch]
+        
+        # Assign electrical node names based on the zone
+        if zone == "Power_Top":
+            electrical_node = f"Power_Top_{label}"   
+            hole_id = f"Power_Top_{label}_Col_{col_num}"
 
-    def _calculate_spacing(self, target_len: int) -> float:
-        """Calculates the pixel distance between each hole."""
-        return (target_len - (2 * self.offset_length)) / (self.total_rows - 1)
+        elif zone == "Power_Bottom":
+            electrical_node = f"Power_Bottom_{label}"   
+            hole_id = f"Power_Bottom_{label}_Col_{col_num}"
 
-    def map_pixel_to_node(self, x: float, y: float, target_w: int, target_h: int) -> Tuple[str, int, int]:
-        """
-        Takes a single (x, y) coordinate and snaps it to the nearest physical breadboard hole.
-        Returns: (Node Name, Snapped X, Snapped Y)
-        """
-        is_horizontal = target_w > target_h
-        node_name = "Unknown"
-        snapped_x, snapped_y = int(x), int(y)
+        elif zone == "Terminal_Top":
+            electrical_node = f"Node_Top_{col_num}"
+            hole_id = f"Terminal_Top_Col_{col_num}"
 
-        if is_horizontal:
-            spacing = self._calculate_spacing(target_w)
+        elif zone == "Terminal_Bottom":
+            electrical_node = f"Node_Bottom_{col_num}"
+            hole_id = f"Terminal_Bottom_Col_{col_num}"
+            
+        # Calculate snapped pixel coordinates
+        snapped_x = int(self.offset_x + (col_idx * self.pitch_x))
+        snapped_y = int(self.offset_y + (nearest_pitch * self.pitch_y))
+            
+        return hole_id, electrical_node, (snapped_x, snapped_y)
 
-            # Find nearest row index (1-based)
-            row_idx = int(round((x - self.offset_length) / spacing)) + 1
-            row_idx = max(1, min(row_idx, self.total_rows))
-
-            snapped_x = int(self.offset_length + (row_idx - 1) * spacing)
-
-            power_top_bound = target_h * self.terminal_top_ratio
-            power_bottom_bound = target_h * self.terminal_bottom_ratio
-
-            # --- Power Rails Zones ---
-            if y < power_top_bound:
-                is_plus = y < power_top_bound / 2
-                ratio = self.rails_top_ratio if is_plus else self.rails_bottom_ratio
-                snapped_y = int(power_top_bound * ratio)
-                node_name = "Power_Top_Plus" if is_plus else "Power_Top_Minus"
-
-            elif y > power_bottom_bound:
-                is_plus = y < target_h - (target_h - power_bottom_bound) / 2
-                ratio = self.rails_bottom_ratio if is_plus else self.rails_top_ratio
-                snapped_y = int(target_h - (target_h - power_bottom_bound) * ratio)
-                node_name = "Power_Bottom_Plus" if is_plus else "Power_Bottom_Minus"
-
-            # --- Terminal Strips Zones ---
-            else:
-                side = "Top" if y < target_h / 2 else "Bottom"
-                node_name = f"Row_{row_idx}_{side}"
-                snapped_y = int(y)  # Keep original Y for terminal strips, or snap to nearest 5 holes later
-
-        return node_name, snapped_x, snapped_y
-
-    def map_to_holes(self, component_data: dict, target_w: int, target_h: int) -> List[Dict]:
-        """
-        Takes the AI Keypoint outputs and maps every component's legs to breadboard nodes.
-        Assumes component_data['keypoints'] contains arrays of [x, y] coordinates.
-        """
+    def map_to_holes(self, component_data: dict) -> List[Dict]:
         mapped_components = []
 
-        # Safely check if keypoints exist
         if 'keypoints' not in component_data or len(component_data['keypoints']) == 0:
             return mapped_components
 
-        # Iterate through every detected component (resistor/wire)
         for i, kpts in enumerate(component_data['keypoints']):
-            # A resistor or jumper wire should have exactly 2 keypoints (the legs)
             if len(kpts) >= 2:
-                leg1_x, leg1_y = kpts[0]
-                leg2_x, leg2_y = kpts[1]
-
-                # Map Leg 1
-                node1, sx1, sy1 = self.map_pixel_to_node(leg1_x, leg1_y, target_w, target_h)
-                # Map Leg 2
-                node2, sx2, sy2 = self.map_pixel_to_node(leg2_x, leg2_y, target_w, target_h)
+                leg1_x, leg1_y = kpts[0][:2]
+                leg2_x, leg2_y = kpts[1][:2]
+                hole1, elec1, snap1 = self.map_pixel_to_node(leg1_x, leg1_y)
+                hole2, elec2, snap2 = self.map_pixel_to_node(leg2_x, leg2_y)
 
                 mapped_components.append({
                     'id': i,
-                    'node1': node1,
-                    'node2': node2,
-                    'snapped_points': [(sx1, sy1), (sx2, sy2)]
+                    'node1': elec1,          
+                    'node2': elec2,
+                    'hole1_name': hole1,    
+                    'hole2_name': hole2,
+                    'snapped_points': [snap1, snap2]
                 })
 
         return mapped_components
 
     def draw_grid_overlay(self, frame: np.ndarray) -> np.ndarray:
-        """
-        Optional debugging tool: Draws the grid logic over the image
-        to ensure spacing and offsets are perfectly aligned with reality.
-        """
         grid_img = frame.copy()
-        target_h, target_w = grid_img.shape[:2]
-        is_horizontal = target_w > target_h
-
-        if is_horizontal:
-            spacing = self._calculate_spacing(target_w)
-            top_bound = int(target_h * self.terminal_top_ratio)
-            bot_bound = int(target_h * self.terminal_bottom_ratio)
-
-            cv2.line(grid_img, (0, top_bound), (target_w, top_bound), (255, 0, 0), 1)
-            cv2.line(grid_img, (0, bot_bound), (target_w, bot_bound), (255, 0, 0), 1)
-
-            for i in range(self.total_rows):
-                x = int(self.offset_length + (i * spacing))
-                cv2.line(grid_img, (x, top_bound), (x, bot_bound), (0, 150, 0), 1)
-        # Add else block for vertical debugging if needed...
+        
+        for col_idx in range(self.cols):
+            x = int(self.offset_x + (col_idx * self.pitch_x))
+            for pitch, (label, zone) in self.y_pitch_map.items():
+                y = int(self.offset_y + (pitch * self.pitch_y))
+                
+                color = (0, 255, 0) # Green for holes
+                
+                if "Power" in zone:
+                    if label in ["Rail_A", "Rail_C"]:
+                        color = (0, 0, 255) # Red for Rail A/C
+                    else:
+                        color = (255, 0, 0) # Blue for Rail B/D
+                        
+                cv2.circle(grid_img, (x, y), 3, color, -1)
 
         return grid_img

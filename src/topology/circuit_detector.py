@@ -1,13 +1,8 @@
 import networkx as nx
 from typing import List, Dict, Tuple
-
+from src.topology.rtotal_calculator import RTotalCalculator
 
 class CircuitDetector:
-    """
-    Analyzes electrical topologies by building a NetworkX graph from breadboard
-    connections. Calculates equivalent resistance and detects specific circuit types.
-    """
-
     def __init__(self):
         # Define a template graph for a Wheatstone Bridge
         # 4 nodes (A, B, C, D) with 5 resistor edges: A-B, A-C, B-D, C-D, and B-C (crossbar)
@@ -16,8 +11,7 @@ class CircuitDetector:
             (1, 2), (1, 3), (2, 4), (3, 4), (2, 3)
         ])
 
-    def analyze_topology(self, mapped_components: List[Dict], resistor_values: List[Dict]) -> Tuple[
-        str, nx.Graph, float]:
+    def analyze_topology(self, mapped_components: List[Dict], resistor_values: List[Dict]) -> Tuple[str, nx.Graph, float]:
         """
         Public Entry Point.
         Takes grid locations and color band values to analyze the circuit.
@@ -35,9 +29,24 @@ class CircuitDetector:
         # 3. Detect Topology (Series, Parallel, Wheatstone, Complex)
         circuit_type = self._classify_topology(G)
 
-        # 4. (Optional/Advanced) Calculate total resistance via graph reduction
-        # total_r = self._calculate_equivalent_resistance(G.copy())
-        total_r = 0.0  # Placeholder for mathematical reduction logic
+        # 4. Calculate total resistance (Auto-Detect Rails)
+        calculator = RTotalCalculator()
+        
+        possible_starts = ["Power_Top_Rail_A", "Power_Top_Rail_B"]
+        possible_ends = ["Power_Bottom_Rail_C", "Power_Bottom_Rail_D"]
+        
+        start_node = next((n for n in possible_starts if G.has_node(n)), None)
+        end_node = next((n for n in possible_ends if G.has_node(n)), None)
+        
+        total_r = 0.0 
+        
+        # ถ้าเจอทั้งจุดเริ่มต้นและจุดสิ้นสุด ให้รันคณิตศาสตร์หา R รวม
+        if start_node and end_node:
+            total_r = calculator.calculate(G, start_node, end_node)
+        elif G.number_of_nodes() > 0 and circuit_type != "Open Circuit":
+            # กรณีผู้ใช้ไม่ได้ต่อลงรางไฟเลย (ต่อลอยๆ กลางบอร์ด) 
+            # เราสามารถดึงโหนดที่อยู่ซ้ายสุด-ขวาสุด มาคำนวณแก้ขัดได้ครับ (ถ้าต้องการ)
+            pass
 
         return circuit_type, G, total_r
 
@@ -71,7 +80,7 @@ class CircuitDetector:
 
     def _collapse_wires(self, G: nx.MultiGraph) -> nx.MultiGraph:
         """
-        🌱 Critical Logical Step:
+        Critical Logical Step:
         Finds all edges that are 'wires' and merges their endpoint nodes.
         This transforms physical breadboard geography into a logical schematic.
         """

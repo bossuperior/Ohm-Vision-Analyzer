@@ -1,35 +1,33 @@
 import cv2
 import numpy as np
 from typing import List, Dict, Tuple
-
-# Assuming these are available in your vision module
-from src.vision.band_detector import detect_bands_projection, closest_color, COLOR_VALS
-
+from src.vision.band_detector import BandDetector
+from src.vision.color_mapping import COLOR_VALS
 
 class BandReader:
     def __init__(self, y_start_pct: float = 0.15, y_end_pct: float = 0.35):
         # Configurable sample region to avoid cylindrical glare.
-        # Moving these to __init__ allows you to easily tweak them
-        # depending on your webcam's lighting without touching the core logic.
         self.y_start_pct = y_start_pct
         self.y_end_pct = y_end_pct
+        self.detector = BandDetector()
 
-    def calculate(self, cropped_resistor: np.ndarray) -> Tuple[str, List[Dict]]:
+    def calculate(self, cropped_resistor: np.ndarray) -> Tuple[str, List[Dict], float]:
         """
         Public entry point. Scans bands and returns the string value and raw data.
         Returns: ("1.50k Ohms 5%", [{'color': 'BROWN'...}, ...])
         """
+        band_detector = BandDetector()
         bands = self._scan_bands(cropped_resistor)
 
         if not bands:
-            return "Unknown", []
-
-        resistance_str = self._calculate_ohms(bands)
-        return resistance_str, bands
+            return "Unknown", [],0.0
+        bands = band_detector.fix_false_colors(bands)
+        resistance_str, bands, total_ohms = self._calculate_ohms(bands)
+        return resistance_str, bands, total_ohms
 
     def _scan_bands(self, roi: np.ndarray) -> List[Dict]:
-        """Private helper: Extracts colors from the image ROI."""
-        band_locs = detect_bands_projection(roi)
+        #Extract band colors from the cropped resistor image (Region of Interest) and return a list of detected bands with their colors and positions
+        band_locs = self.detector.detect_bands_projection(roi)
         detected_bands = []
 
         if not band_locs:
@@ -37,7 +35,6 @@ class BandReader:
 
         hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         h, w = roi.shape[:2]
-
         y1, y2 = int(h * self.y_start_pct), int(h * self.y_end_pct)
 
         for loc in band_locs:
@@ -48,14 +45,13 @@ class BandReader:
             safe_w = max(1, w_band // 2)
             x1 = max(0, cx - safe_w // 2)
             x2 = min(w, cx + safe_w // 2)
-
             sample_region = hsv_roi[y1:y2, x1:x2]
 
             if sample_region.size == 0:
                 continue
 
             mean_color = cv2.mean(sample_region)[:3]
-            color_name = closest_color(mean_color)
+            color_name = self.detector.closest_color(mean_color)
             val = COLOR_VALS.get(color_name, -99)
 
             detected_bands.append({
@@ -68,10 +64,10 @@ class BandReader:
 
         return detected_bands
 
-    def _calculate_ohms(self, bands: List[Dict]) -> str:
-        """Private helper: Applies Ohm math based on standard resistor codes."""
+    def _calculate_ohms(self, bands: List[Dict]) -> Tuple[str, List[Dict], float]:
+        # Calculate the resistance value based on the detected band colors, applying standard resistor color code rules and handling special cases for tolerance bands
         if len(bands) < 3:
-            return "Unknown"
+            return "Unknown", bands, 0.0
 
         # 1. Handle reading direction (Gold/Silver are never the first band)
         if bands[0]['color'] in ['GOLD', 'SILVER']:
@@ -91,7 +87,7 @@ class BandReader:
             calc_bands = bands[:-1]
 
         if len(calc_bands) < 2:
-            return "Error"
+            return "Error", bands, 0.0
 
         try:
             # 3. Calculate Base Value
@@ -106,7 +102,7 @@ class BandReader:
 
             # Prevent math errors if a color matched incorrectly
             if multiplier_idx == -99 or digit1 == -99 or digit2 == -99:
-                return "Read Error"
+                return "Read Error", bands, 0.0
 
             # Note: Ensure your COLOR_VALS dict has GOLD = -1 and SILVER = -2
             if multiplier_idx >= 0:
@@ -122,12 +118,14 @@ class BandReader:
 
             # 5. Format Output
             if total_ohms >= 1e6:
-                return f"{total_ohms / 1e6:.2f}M Ohms ±{tolerance}"
+                formatted_str = f"{total_ohms / 1e6:.2f}M Ohms ±{tolerance}"
             elif total_ohms >= 1e3:
-                return f"{total_ohms / 1e3:.2f}k Ohms ±{tolerance}"
+                formatted_str = f"{total_ohms / 1e3:.2f}k Ohms ±{tolerance}"
             else:
-                return f"{total_ohms:.1f} Ohms ±{tolerance}"
+                formatted_str = f"{total_ohms:.1f} Ohms ±{tolerance}"
+            
+            return formatted_str, bands, total_ohms
 
         except Exception as e:
             print(f"Calculation error: {e}")
-            return "Calc Error"
+            return "Calc Error", bands, 0.0

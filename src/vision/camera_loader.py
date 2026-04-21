@@ -35,7 +35,7 @@ class CameraLoader:
 
         actual_w = self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)
         actual_h = self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-        print(f"📸 Threaded Camera {self.camera_id} started at {actual_w}x{actual_h}")
+        print(f" Threaded Camera {self.camera_id} started at {actual_w}x{actual_h}")
 
     def _update_loop(self):
         """Continuously grabs frames in the background."""
@@ -50,8 +50,8 @@ class CameraLoader:
 
     def get_frame(self):
         if not self.ret or self.frame is None:
-            return False, None
-        return self.ret, self.frame.copy()
+            return None
+        return self.frame.copy() 
 
     def stop(self):
         self.is_running = False
