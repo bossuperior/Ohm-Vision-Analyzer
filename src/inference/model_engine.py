@@ -46,7 +46,7 @@ class ModelEngine:
     # 1. YOLOv8 POSE ONNX ENGINE
     # --------------------------
     def _predict_yolo(self, frame):
-        results = self.engine(frame, verbose=False, conf=0.3, iou=0.45)[0]
+        results = self.engine(frame, verbose=False, conf=0.2, iou=0.45)[0]
         
         boxes     = results.boxes.xyxy.cpu().numpy()  if results.boxes     else np.array([])
         class_ids = results.boxes.cls.cpu().numpy()   if results.boxes     else np.array([])
