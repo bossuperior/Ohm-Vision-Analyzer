@@ -46,12 +46,13 @@ class ModelEngine:
     # 1. YOLOv8 POSE ONNX ENGINE
     # --------------------------
     def _predict_yolo(self, frame):
-        results = self.engine(frame, verbose=False, conf=0.2, iou=0.45)[0]
+        results = self.engine(frame, verbose=False, conf=0.75, iou=0.45)[0]
         
-        boxes     = results.boxes.xyxy.cpu().numpy()  if results.boxes     else np.array([])
-        class_ids = results.boxes.cls.cpu().numpy()   if results.boxes     else np.array([])
-        scores    = results.boxes.conf.cpu().numpy()  if results.boxes     else np.array([])
-        keypoints = results.keypoints.xy.cpu().numpy() if results.keypoints else np.array([])
+        boxes     = results.boxes.xyxy.cpu().numpy()    if results.boxes     else np.array([])
+        class_ids = results.boxes.cls.cpu().numpy()     if results.boxes     else np.array([])
+        scores    = results.boxes.conf.cpu().numpy()    if results.boxes     else np.array([])
+        # data shape: (N, K, 3) → x, y, conf per keypoint
+        keypoints = results.keypoints.data.cpu().numpy() if results.keypoints else np.array([])
 
         return DetectionResult(boxes, keypoints, class_ids, scores)
 
