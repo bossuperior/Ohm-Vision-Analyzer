@@ -9,7 +9,6 @@ Keys: 0=BLACK 1=BROWN 2=RED 3=ORANGE 4=YELLOW 5=GREEN
       Enter=Save   q=Quit without saving
 """
 import cv2
-import numpy as np
 import os
 import sys
 
@@ -17,8 +16,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from src.inference.model_engine import ModelEngine
-from src.vision.perspective_transform import PerspectiveTransformer, PointSmoother
+from src.vision.breadboard_warper import BreadboardWarper
 from src.vision.camera_loader import CameraLoader
 
 COLOR_NAMES = {
@@ -32,7 +30,7 @@ clicked_pt   = (405, 270)
 display_size = (810, 540)   # ค่า default ก่อนรู้ขนาด frame จริง
 
 
-def mouse_callback(event, x, y, flags, param):
+def mouse_callback(event, x, y, _flags, _param):
     global clicked_pt
     if event == cv2.EVENT_LBUTTONDOWN:
         clicked_pt = (x, y)
@@ -99,10 +97,7 @@ def main():
     camera = CameraLoader(camera_id=1)
     camera.start()
 
-    model_path   = os.path.join(PROJECT_ROOT, "models", "Yolo_v8n_pose_weights.onnx")
-    engine       = ModelEngine(model_path=model_path, model_type="yolov8")
-    transformer  = PerspectiveTransformer()
-    smoother     = PointSmoother()
+    warper         = BreadboardWarper(output_width=810, output_height=540)
     calibrated_hsv: dict = {}
 
     WIN = "Ohm-Vision Color Tuner"
@@ -118,45 +113,27 @@ def main():
     print("4. q = ออกโดยไม่บันทึก")
     print("=" * 45)
 
-    last_valid_corners = None
-    board_miss_count   = 0
-    MISS_TOLERANCE     = 8
+    last_warped      = None
+    board_miss_count = 0
+    MISS_TOLERANCE   = 8
 
     while True:
         frame = camera.get_frame()
         if frame is None:
             continue
 
-        results = engine.predict(frame)
+        success, warped = warper.process(frame)
 
-        # ── Board corner tracking ─────────────────────────────────────
-        if results.has_board():
-            raw_corners = results.get_board_corners()   # shape (4, 2)
-
-            # ✅ Fix #1: ตรวจ corners ว่า valid ก่อน warp
-            if transformer.validate_corners(raw_corners):
-                last_valid_corners = raw_corners
-                board_miss_count   = 0
-            else:
-                board_miss_count += 1
+        if success and warped.std() > 15:
+            last_warped      = warped
+            board_miss_count = 0
         else:
             board_miss_count += 1
 
         # ── Warp / fallback ──────────────────────────────────────────
-        display_frame = None
-
-        if board_miss_count <= MISS_TOLERANCE and last_valid_corners is not None:
-            stable = smoother.update(last_valid_corners)
-
-            # ✅ Fix #2: warp อาจ return (None, _) → ต้อง check ก่อนใช้
-            warped, _ = transformer.warp(frame, stable)
-            if warped is not None and warped.std() > 15:
-                display_frame = warped
-            else:
-                smoother.reset()
-
-        if display_frame is None:
-            # Fallback: แสดง frame ดิบ พร้อม warning
+        if board_miss_count <= MISS_TOLERANCE and last_warped is not None:
+            display_frame = last_warped
+        else:
             display_frame = frame.copy()
             cv2.putText(display_frame,
                         "NO BOARD — point camera at breadboard",
