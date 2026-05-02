@@ -13,23 +13,45 @@ class GridMapper:
         self.cols = 30
 
         self.y_pitch_map = {
-            0: ("Rail_A", "Power_Top"),    
-            1: ("Rail_B", "Power_Top"),     
-            3: ("Hole", "Terminal_Top"),
-            4: ("Hole", "Terminal_Top"),
-            5: ("Hole", "Terminal_Top"),
-            6: ("Hole", "Terminal_Top"),
-            7: ("Hole", "Terminal_Top"),
+            0:  ("Rail_A", "Power_Top"),
+            1:  ("Rail_B", "Power_Top"),
+            # Terminal_Top 6 rows (a-f)
+            3:  ("Hole", "Terminal_Top"),
+            4:  ("Hole", "Terminal_Top"),
+            5:  ("Hole", "Terminal_Top"),
+            6:  ("Hole", "Terminal_Top"),
+            7:  ("Hole", "Terminal_Top"),
+            8:  ("Hole", "Terminal_Top"),   # แถวชิดกลาง
+            # middle divider (no holes) — gap 0 step
+            # Terminal_Bottom 6 rows (g-l)
+            9:  ("Hole", "Terminal_Bottom"),  # แถวชิดกลาง
             10: ("Hole", "Terminal_Bottom"),
             11: ("Hole", "Terminal_Bottom"),
             12: ("Hole", "Terminal_Bottom"),
             13: ("Hole", "Terminal_Bottom"),
             14: ("Hole", "Terminal_Bottom"),
+            # bottom gap 2 steps (15)
             16: ("Rail_C", "Power_Bottom"),
-            17: ("Rail_D", "Power_Bottom") 
+            17: ("Rail_D", "Power_Bottom"),
         }
         
-        # Calculate the pitch (distance between holes)
+        self._recompute_pitch()
+
+    def set_params(self, offset_x: int, offset_y: int,
+                   pitch_x: float = None, pitch_y: float = None, cols: int = None):
+        self.offset_x = offset_x
+        self.offset_y = offset_y
+        if cols is not None and cols > 1:
+            self.cols = cols
+        if pitch_x is not None and pitch_x > 0:
+            self.pitch_x = pitch_x
+        if pitch_y is not None and pitch_y > 0:
+            self.pitch_y = pitch_y
+        # ถ้าไม่ได้ set pitch ตรงๆ ให้คำนวณจาก cols
+        if pitch_x is None:
+            self._recompute_pitch()
+
+    def _recompute_pitch(self):
         self.pitch_x = (self.target_w - 2 * self.offset_x) / (self.cols - 1)
         self.pitch_y = (self.target_h - 2 * self.offset_y) / 17.0
 
@@ -93,22 +115,49 @@ class GridMapper:
 
         return mapped_components
 
-    def draw_grid_overlay(self, frame: np.ndarray) -> np.ndarray:
-        grid_img = frame.copy()
-        
-        for col_idx in range(self.cols):
-            x = int(self.offset_x + (col_idx * self.pitch_x))
-            for pitch, (label, zone) in self.y_pitch_map.items():
-                y = int(self.offset_y + (pitch * self.pitch_y))
-                
-                color = (0, 255, 0) # Green for holes
-                
-                if "Power" in zone:
-                    if label in ["Rail_A", "Rail_C"]:
-                        color = (0, 0, 255) # Red for Rail A/C
-                    else:
-                        color = (255, 0, 0) # Blue for Rail B/D
-                        
-                cv2.circle(grid_img, (x, y), 3, color, -1)
+    def draw_grid_overlay(self, frame: np.ndarray, alpha: float = 0.5) -> np.ndarray:
+        overlay = frame.copy()
 
-        return grid_img
+        # จัดกลุ่ม pitch index ตาม zone
+        zone_groups = {
+            "Power_Top_A":    [0],
+            "Power_Top_B":    [1],
+            "Terminal_Top":   [3, 4, 5, 6, 7, 8],
+            "Terminal_Bottom":[9, 10, 11, 12, 13, 14],
+            "Power_Bottom_C": [16],
+            "Power_Bottom_D": [17],
+        }
+        zone_colors = {
+            "Power_Top_A":     (0, 0, 255),    # แดง
+            "Power_Top_B":     (255, 100, 0),  # น้ำเงินเข้ม
+            "Terminal_Top":    (0, 200, 80),   # เขียว
+            "Terminal_Bottom": (0, 180, 255),  # ฟ้า
+            "Power_Bottom_C":  (0, 0, 200),   # แดงเข้ม
+            "Power_Bottom_D":  (200, 80, 0),  # น้ำเงิน
+        }
+
+        x_start = int(self.offset_x)
+        x_end   = int(self.offset_x + (self.cols - 1) * self.pitch_x)
+
+        for zone_name, pitches in zone_groups.items():
+            color = zone_colors[zone_name]
+            ys = [int(self.offset_y + p * self.pitch_y) for p in pitches]
+            y_top = min(ys)
+            y_bot = max(ys)
+
+            is_power = "Power" in zone_name
+
+            if is_power:
+                # Power rail → เส้นแนวนอนยาวตลอด
+                for y in ys:
+                    cv2.line(overlay, (x_start, y), (x_end, y), color, 2)
+            else:
+                # Terminal → เส้นแนวตั้งต่อ 5 รูในแต่ละคอลัมน์
+                for col_idx in range(self.cols):
+                    x = int(self.offset_x + col_idx * self.pitch_x)
+                    cv2.line(overlay, (x, y_top), (x, y_bot), color, 2)
+                    # จุดเล็กที่หัว-ท้าย
+                    cv2.circle(overlay, (x, y_top), 2, color, -1)
+                    cv2.circle(overlay, (x, y_bot), 2, color, -1)
+
+        return cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)

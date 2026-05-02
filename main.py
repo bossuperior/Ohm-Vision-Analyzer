@@ -4,6 +4,7 @@ import time
 from src.vision.camera_loader import CameraLoader
 from src.inference.model_engine import ModelEngine
 from src.vision.breadboard_warper import BreadboardWarper
+from src.topology.grid_mapper import GridMapper
 
 BOX_COLORS = {
     "resistor": (0, 200, 255),
@@ -87,6 +88,21 @@ def main():
 
     class_names = engine.engine.names
 
+    grid_mapper  = GridMapper(target_w=810, target_h=540)
+    show_grid    = False
+
+    WIN = "Ohm-Vision"
+    cv2.namedWindow(WIN)
+    # Crop trackbars — Margin + ShiftX/Y (0-200, center=100)
+    cv2.createTrackbar("Margin",      WIN, transformer.margin,      300, lambda _: None)
+    cv2.createTrackbar("Shift X",     WIN, 100 + transformer.shift_x, 200, lambda _: None)
+    cv2.createTrackbar("Shift Y",     WIN, 100 + transformer.shift_y, 200, lambda _: None)
+    # GridMapper calibration trackbars (PitchX/Y = ค่าจริง × 10 เพื่อให้ปรับทีละ 0.1px)
+    cv2.createTrackbar("Grid OffX",   WIN, grid_mapper.offset_x,              200, lambda _: None)
+    cv2.createTrackbar("Grid OffY",   WIN, grid_mapper.offset_y,              200, lambda _: None)
+    cv2.createTrackbar("Grid PitchX", WIN, int(grid_mapper.pitch_x * 10),     500, lambda _: None)
+    cv2.createTrackbar("Grid PitchY", WIN, int(grid_mapper.pitch_y * 10),     500, lambda _: None)
+
     camera.start()
     time.sleep(1)
 
@@ -96,33 +112,52 @@ def main():
             if frame is None:
                 continue
 
-            # Detect on raw frame (matches training data perspective)
-            results = engine.predict(frame)
+            # อ่านค่า crop realtime
+            transformer.margin  = cv2.getTrackbarPos("Margin",  WIN)
+            transformer.shift_x = cv2.getTrackbarPos("Shift X", WIN) - 100
+            transformer.shift_y = cv2.getTrackbarPos("Shift Y", WIN) - 100
 
+            # อ่านค่า GridMapper realtime
+            off_x   = cv2.getTrackbarPos("Grid OffX",   WIN)
+            off_y   = cv2.getTrackbarPos("Grid OffY",   WIN)
+            pitch_x = cv2.getTrackbarPos("Grid PitchX", WIN) / 10.0
+            pitch_y = cv2.getTrackbarPos("Grid PitchY", WIN) / 10.0
+            grid_mapper.set_params(off_x, off_y, pitch_x=pitch_x, pitch_y=pitch_y)
+
+            results = engine.predict(frame)
             success, warped, matrix = transformer.process(frame)
 
             if success:
                 display_frame = warped.copy()
-                # Transform detected boxes/keypoints into warped coordinate space
+                if show_grid:
+                    display_frame = grid_mapper.draw_grid_overlay(display_frame)
                 draw_results(display_frame, results, class_names, matrix=matrix)
                 cv2.putText(display_frame, "BOARD OK [ArUco]",
                             (20, 40), cv2.FONT_HERSHEY_DUPLEX,
                             1.0, (0, 255, 0), 2)
+                t = transformer
+                cv2.putText(display_frame,
+                            f"Margin:{t.margin} ShiftX:{t.shift_x} ShiftY:{t.shift_y}  |  OffX:{off_x} OffY:{off_y} PX:{pitch_x:.1f} PY:{pitch_y:.1f}",
+                            (10, display_frame.shape[0] - 35),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 220, 0), 1)
             else:
                 display_frame = frame.copy()
-                # Draw raw detections on original frame while searching
                 draw_results(display_frame, results, class_names, matrix=None)
                 cv2.putText(display_frame, "SEARCHING FOR ARUCO TAGS...",
                             (20, 60), cv2.FONT_HERSHEY_DUPLEX,
                             1.0, (0, 0, 255), 2)
 
-            cv2.putText(display_frame, "Press [Q] to Exit",
+            hint = "[Q] Exit  [G] Toggle Grid"
+            cv2.putText(display_frame, hint,
                         (10, display_frame.shape[0] - 15),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 0), 1)
 
-            cv2.imshow("Ohm-Vision", display_frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            cv2.imshow(WIN, display_frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
                 break
+            elif key == ord('g'):
+                show_grid = not show_grid
 
     except Exception as e:
         import traceback
