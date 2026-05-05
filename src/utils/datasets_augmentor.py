@@ -5,20 +5,7 @@ import albumentations as A
 import copy
 import numpy as np
 
-# ── helper: identical to perspective_transform.order_points() ──────────────
-def order_corners_tltrbrbl(pts):
-    pts = np.array(pts, dtype=float)   # shape (4, 2)
-    rect = np.zeros((4, 2), dtype=float)
-
-    s    = pts.sum(axis=1)
-    diff = np.diff(pts, axis=1).flatten()
-
-    rect[0] = pts[np.argmin(s)]     # TL: min(x+y)
-    rect[2] = pts[np.argmax(s)]     # BR: max(x+y)
-    rect[1] = pts[np.argmin(diff)]  # TR: min(y-x)
-    rect[3] = pts[np.argmax(diff)]  # BL: max(y-x)
-
-    return rect.tolist()            # [[x,y], [x,y], [x,y], [x,y]]
+MIN_BRIGHTNESS = 40
 
 
 class DatasetsAugmentor:
@@ -30,57 +17,42 @@ class DatasetsAugmentor:
 
         os.makedirs(self.output_img_dir, exist_ok=True)
 
-        # ── Augmentation pipeline 
+        # ── Augmentation pipeline
         self.transform = A.Compose([
-            # 1. Solve Orientation Bias: Randomly rotate 90 degrees to ensure vertical variants
-            A.RandomRotate90(p=0.5),
-
-            # 2. Spatial Transformation: Simulate camera tilts (up to 45 degrees for diagonals)
-            A.Affine(
-                translate_percent={"x": (-0.05, 0.05), "y": (-0.05, 0.05)},
-                scale=(0.9, 1.1),
-                rotate=(-45, 45),
-                interpolation=cv2.INTER_CUBIC,
-                p=0.8
-            ),
-            
-            # 3. Lighting Adjustment: Modify only brightness/contrast; NEVER touch Hue.
+            # 1. Lighting
             A.RandomBrightnessContrast(
-                brightness_limit=0.4, 
-                contrast_limit=0.3,   
+                brightness_limit=0.3,
+                contrast_limit=0.2,
                 p=0.8
             ),
-            A.RandomGamma(
-                gamma_limit=(60, 140),
+            A.RandomGamma(gamma_limit=(70, 130), p=0.5),
+
+            # 3. Color variation — NO hue shift (preserves resistor band colors)
+            A.HueSaturationValue(
+                hue_shift_limit=0,
+                sat_shift_limit=20,
+                val_shift_limit=30,
                 p=0.5
             ),
-            A.RandomShadow(
-                shadow_roi=(0, 0, 1, 1),
-                num_shadows_limit=(1, 2),
-                shadow_dimension=4,
-                p=0.4
-            ),
 
+            # 4. Blur / noise — simulate defocus and sensor noise seen in dataset
+            A.OneOf([
+                A.GaussianBlur(blur_limit=(3, 7), p=1.0),
+                A.MotionBlur(blur_limit=7, p=1.0),
+            ], p=0.3),
+            A.GaussNoise(std_range=(0.01, 0.05), p=0.3),
+
+            # 5. CLAHE — simulate high-contrast lighting on breadboard surface
             A.CLAHE(clip_limit=2.0, tile_grid_size=(4, 4), p=0.3),
         ],
         # Crucial: Instruct Albumentations to calculate and update BBoxes and Keypoints
         bbox_params=A.BboxParams(format='coco', label_fields=['category_ids']),
         keypoint_params=A.KeypointParams(format='xy', remove_invisible=False))
 
-    # ── board category id ── 
-    def _get_board_cat_id(self, coco: dict) -> int:
-        for cat in coco.get('categories', []):
-            if len(cat.get('keypoints', [])) == 4:
-                return cat['id']
-        return -1 
-
-    def run_augmentation(self, augment_times: int = 3):
+    def run_augmentation(self, augment_times: int = 4):
         print(f"Loading Master JSON: {self.json_path}")
         with open(self.json_path, 'r', encoding='utf-8') as f:
             coco = json.load(f)
-
-        board_cat_id = self._get_board_cat_id(coco)
-        print(f"  Board category_id = {board_cat_id}")
 
         new_coco               = copy.deepcopy(coco)
         new_coco['images']     = []
@@ -159,6 +131,12 @@ class DatasetsAugmentor:
 
                 aug_H, aug_W = aug_img.shape[:2]
 
+                # Skip if augmented image is too dark
+                brightness = int(np.mean(aug_img))
+                if brightness < MIN_BRIGHTNESS:
+                    print(f"  [skip aug {aug_i} '{img_filename}'] too dark (brightness={brightness})")
+                    continue
+
                 # Save augmented image
                 aug_filename = f"aug_{aug_i}_{img_filename}"
                 cv2.imwrite(os.path.join(self.output_img_dir, aug_filename),
@@ -182,15 +160,6 @@ class DatasetsAugmentor:
                         in_bounds = (0 <= px < aug_W) and (0 <= py < aug_H)
                         new_v     = orig_v if in_bounds else 0
                         pts_after.append((px, py, new_v))
-
-                    if (ann.get('category_id')) == board_cat_id and len(pts_after) == 4:
-                        visible = [(p[0], p[1]) for p in pts_after if p[2] != 0]
-                        vis_flags = [p[2] for p in pts_after if p[2] != 0]
-                        if len(visible) == 4:
-                            ordered_xy = order_corners_tltrbrbl(visible)
-                            pts_after  = [(ordered_xy[i][0],
-                                           ordered_xy[i][1],
-                                           vis_flags[i]) for i in range(4)]
 
                     # Flatten back to COCO [x, y, v, x, y, v, ...]
                     new_kpts = []

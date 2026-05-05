@@ -6,13 +6,12 @@ class CocoToYoloPoseConverter:
         self.max_keypoints = max_keypoints
         # Mapping COCO class names → YOLO class IDs
         self.target_classes = {
-            'board':       0,
-            'resistor':    1,
-            'wire':        2,
+            'resistor':    0,
+            'wire':        1,
         }
 
     def convert(self, json_path, output_dir):
-        print(f"\n Processing file...: {json_path} Skipping...")
+        print(f"\n Processing: {json_path}")
         if not os.path.exists(json_path):
             print(f"  [skip] File not found: {json_path}")
             return
