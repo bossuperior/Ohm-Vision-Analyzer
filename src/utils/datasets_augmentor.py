@@ -5,7 +5,7 @@ import albumentations as A
 import copy
 import numpy as np
 
-MIN_BRIGHTNESS = 40
+MIN_BRIGHTNESS = 30
 
 
 class DatasetsAugmentor:

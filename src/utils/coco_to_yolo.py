@@ -65,7 +65,7 @@ class CocoToYoloPoseConverter:
                 yolo_class_id = coco_to_yolo_id[coco_cat_id]
 
                 # BBox (COCO: x_min, y_min, w, h → YOLO: cx, cy, w, h normalized)
-                bx, by, bw, bh = ann['bbox']
+                bx, by, bw, bh = [float(v) for v in ann['bbox']]
                 x_center = (bx + bw / 2.0) / img_w
                 y_center = (by + bh / 2.0) / img_h
                 norm_bw  = bw / img_w
