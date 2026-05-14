@@ -4,229 +4,332 @@ from typing import List, Dict, Tuple
 from src.vision.band_detector import BandDetector
 from src.vision.color_mapping import COLOR_VALS
 
+_BAND_BGR = {
+    'BLACK':  (30,  30,  30),   'BROWN':  (30,  80, 160),
+    'RED':    (0,   0,  220),   'ORANGE': (0,  140, 255),
+    'YELLOW': (0,  220, 220),   'GOLD':   (0,  190, 200),
+    'GREEN':  (0,  160,  50),   'BLUE':   (220,  80,   0),
+    'VIOLET': (180,  0,  160),  'GRAY':   (140, 140, 140),
+    'WHITE':  (240, 240, 240),  'SILVER': (180, 180, 200),
+    'UNKNOWN':(80,  80,  80),
+}
+
 
 class BandReader:
-    def __init__(self, y_start_pct: float = 0.25, y_end_pct: float = 0.75):
-        self.y_start_pct = y_start_pct
-        self.y_end_pct = y_end_pct
+    def __init__(self):
         self.detector = BandDetector()
 
-    # ──────────────────────────────────────────────────────────
-    # 1. Crop ขอบออก (เอาเฉพาะตัวถัง ตัดขาออก)
-    # ──────────────────────────────────────────────────────────
+    # ── 0. Affine-crop: ดึง rotated rectangle ตาม Body_2→Body_3 ──────────────
+    def crop_from_keypoints(self, warped: np.ndarray,
+                            kp_data: np.ndarray) -> np.ndarray:
+        if kp_data is None or len(kp_data) < 4:
+            return None
+        if kp_data[2][2] < 0.5 or kp_data[3][2] < 0.5:
+            return None
+
+        p2 = kp_data[2][:2].astype(float)
+        p3 = kp_data[3][:2].astype(float)
+        dx, dy = p3[0] - p2[0], p3[1] - p2[1]
+        length = float(np.hypot(dx, dy))
+        if length < 10:
+            return None
+
+        cx, cy   = (p2[0] + p3[0]) / 2, (p2[1] + p3[1]) / 2
+        cos_a, sin_a = dx / length, dy / length
+        perp_pad = int(np.clip(length * 0.20, 12, 30))
+
+        out_w = int(length) + 60   # 30px margin ทั้งสองด้าน → เห็น body สีเบจชัดที่ขอบ
+        out_h = perp_pad * 2       # ความหนาตั้งฉาก
+
+        # Affine inverse-map: dst pixel (u,v) → warped pixel (x,y)
+        # top-left (0,0) = center − half_body*body_unit − half_h*perp_unit
+        tx = cx - (out_w / 2) * cos_a + (out_h / 2) * sin_a
+        ty = cy - (out_w / 2) * sin_a - (out_h / 2) * cos_a
+        M  = np.float32([[cos_a, -sin_a, tx],
+                         [sin_a,  cos_a, ty]])
+
+        crop = cv2.warpAffine(warped, M, (out_w, out_h),
+                              flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP)
+        return crop if crop.size > 0 else None
+
+    # ── 1. ตัดขอบซ้าย-ขวาเล็กน้อย (กัน lead ที่อาจเลยเข้ามา) ───────────────
     def _shrink_roi(self, img: np.ndarray) -> np.ndarray:
         h, w = img.shape[:2]
-        x1 = int(w * 0.12)
-        x2 = int(w * 0.88)
-        y1 = int(h * 0.05)
-        y2 = int(h * 0.95)
-        if x2 <= x1 or y2 <= y1:
-            return img
-        return img[y1:y2, x1:x2]
+        x1, x2 = int(w * 0.10), int(w * 0.90)
+        y1, y2 = int(h * 0.05), int(h * 0.95)
+        return img[y1:y2, x1:x2] if x2 > x1 and y2 > y1 else img
 
-    # ──────────────────────────────────────────────────────────
-    # 2. Auto White Balance — Gray World assumption
-    # ──────────────────────────────────────────────────────────
+    # ── 1b. Unsharp mask sharpening ──────────────────────────────────────────
+    def _sharpen(self, img: np.ndarray, amount: float = 1.6, sigma: float = 2.0) -> np.ndarray:
+        """
+        Unsharp mask: result = img + amount*(img − blur)
+        ทำให้ edge ระหว่างแถบสีและ body คมขึ้น ช่วยกล้อง focus ไม่ชัด
+        """
+        blur = cv2.GaussianBlur(img, (0, 0), sigmaX=sigma)
+        return cv2.addWeighted(img, 1.0 + amount, blur, -amount, 0)
+
+    # ── 1c. Body isolation: หา x-range ของ resistor body ภายใน crop ───────────
+    def _isolate_body(self, roi: np.ndarray):
+        """
+        Brightness projection บน column แยก body (สว่าง) จาก breadboard (มืด).
+        คืน (body_roi, x_offset_ใน_roi_เดิม)
+        """
+        h, w = roi.shape[:2]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (9, 9), 3)
+
+        # ใช้เฉพาะแถวกลาง 20-80% หลีกเลี่ยง background ด้านบน/ล่าง
+        r0, r1 = int(h * 0.20), int(h * 0.80)
+        col_bright = np.mean(blur[r0:r1], axis=0).astype(float)
+
+        # Otsu บน 1D profile
+        profile_u8 = np.clip(col_bright, 0, 255).astype(np.uint8).reshape(1, -1)
+        thr, _ = cv2.threshold(profile_u8, 0, 255,
+                               cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        body_cols = np.where(col_bright > float(thr))[0]
+
+        # fallback: ถ้าหา body ไม่ได้ หรือแคบเกิน ใช้ full width
+        if len(body_cols) < int(w * 0.20):
+            return roi, 0
+
+        x0 = max(0, int(body_cols[0]) - 4)
+        x1 = min(w, int(body_cols[-1]) + 5)
+        if x1 - x0 < 20:
+            return roi, 0
+
+        return roi[:, x0:x1], x0
+
+    # ── 2a. Gray World AWB ────────────────────────────────────────────────────
     def _awb(self, img: np.ndarray) -> np.ndarray:
-        result = img.astype(np.float32)
+        result  = img.astype(np.float32)
+        all_avg = np.mean(result)
         for ch in range(3):
             avg = np.mean(result[:, :, ch])
             if avg > 0:
-                all_avg = np.mean(result)
                 result[:, :, ch] = np.clip(result[:, :, ch] * (all_avg / avg), 0, 255)
         return result.astype(np.uint8)
 
-    # ──────────────────────────────────────────────────────────
-    # 2b. Board-referenced White Balance
-    #     ใช้สีขอบบอร์ด (เบจ) เป็น reference ปรับ color cast
-    #     แม้แสง LED เหลือง/น้ำเงินทำให้บอร์ดดูต่างออกไป
-    #     ก็สามารถ normalize กลับมาให้ใกล้เคียง neutral ได้
-    # ──────────────────────────────────────────────────────────
-    # BGR ของ breadboard สีเบจมาตรฐาน (วัดจาก neutral white light)
-    BOARD_BEIGE_BGR = np.array([185, 195, 200], dtype=np.float32)  # B, G, R
+    # ── 2b. Board-referenced WB ───────────────────────────────────────────────
+    BOARD_BEIGE_BGR = np.array([185, 195, 200], dtype=np.float32)
 
     def _board_ref_wb(self, img: np.ndarray) -> np.ndarray:
-        """
-        ปรับ white balance โดยใช้ขอบซ้าย-ขวาของ resistor crop เป็น reference
-        (ขอบคือพื้นบอร์ด ไม่ใช่แถบสี)
-        """
-        h, w = img.shape[:2]
-        edge_w = max(1, int(w * 0.10))
-
-        # sample ขอบซ้าย + ขวา (พื้นบอร์ด)
-        left  = img[:, :edge_w].reshape(-1, 3).astype(np.float32)
-        right = img[:, w - edge_w:].reshape(-1, 3).astype(np.float32)
-        measured = np.median(np.vstack([left, right]), axis=0)  # [B, G, R]
-
-        # ถ้า measured มืดหรือสว่างเกินไป ให้ skip (ไม่น่าเชื่อถือ)
+        _, w    = img.shape[:2]
+        edge_w  = max(1, int(w * 0.10))
+        left    = img[:, :edge_w].reshape(-1, 3).astype(np.float32)
+        right   = img[:, w - edge_w:].reshape(-1, 3).astype(np.float32)
+        measured = np.median(np.vstack([left, right]), axis=0)
         if np.any(measured < 30) or np.any(measured > 240):
             return img
+        scale = np.clip(self.BOARD_BEIGE_BGR / (measured + 1e-6), 0.5, 2.0)
+        return np.clip(img.astype(np.float32) * scale, 0, 255).astype(np.uint8)
 
-        scale = self.BOARD_BEIGE_BGR / (measured + 1e-6)
-        # จำกัด scale ไม่ให้ extreme เกินไป (กัน overexpose)
-        scale = np.clip(scale, 0.5, 2.0)
-
-        result = img.astype(np.float32) * scale[np.newaxis, np.newaxis, :]
-        return np.clip(result, 0, 255).astype(np.uint8)
-
-    # ──────────────────────────────────────────────────────────
-    # 3. Public entry point
-    # ──────────────────────────────────────────────────────────
-    def calculate(self, cropped_resistor: np.ndarray) -> Tuple[str, List[Dict], float]:
-        if cropped_resistor is None or cropped_resistor.size == 0:
+    # ── 3. Public entry ───────────────────────────────────────────────────────
+    def calculate(self, cropped: np.ndarray) -> Tuple[str, List[Dict], float]:
+        if cropped is None or cropped.size == 0:
             return "Unknown", [], 0.0
-
-        cleaned_roi = self._shrink_roi(cropped_resistor)
-        cleaned_roi = self._board_ref_wb(cleaned_roi)  # board-referenced WB ก่อน
-        cleaned_roi = self._awb(cleaned_roi)            # Gray World ตาม
-        bands = self._scan_bands(cleaned_roi)
-
+        sharp    = self._sharpen(cropped)           # คมขึ้นก่อนทุก step
+        body_roi, body_x0 = self._isolate_body(sharp)
+        roi = self._awb(body_roi)       # normalize สีก่อนทุกอย่าง
+        roi = self._shrink_roi(roi)
+        bands = self._scan_bands(roi)
         if not bands:
             return "Unknown", [], 0.0
-
         bands = self.detector.fix_false_colors(bands)
-        resistance_str, bands, total_ohms = self._calculate_ohms(bands)
-        return resistance_str, bands, total_ohms
+        # แปลงพิกัด x จาก roi → crop ดั้งเดิม (เพื่อใช้ใน annotate_crop)
+        x_off = body_x0 + int(body_roi.shape[1] * 0.10)
+        for b in bands:
+            b['x_crop'] = b['x'] + x_off
+        return self._calculate_ohms(bands)
 
-    # ──────────────────────────────────────────────────────────
-    # 4. Band scanning (Multi-strip sampling + voting)
-    # ──────────────────────────────────────────────────────────
+    # ── 3b. Debug annotation ──────────────────────────────────────────────────
+    def annotate_crop(self, crop: np.ndarray, bands: List[Dict],
+                      result: str, scale: int = 4) -> np.ndarray:
+        """
+        วาด band overlay บน crop ดั้งเดิม:
+          - scale up เพื่อให้อ่านง่าย
+          - แถบแต่ละอัน: เส้นตั้ง (สีของแถบ) + label ชื่อสี + HSV
+          - แถบสีสรุปด้านบน (color swatch)
+          - ผลลัพธ์ (ohm label) ด้านล่าง
+        """
+        if crop is None or crop.size == 0:
+            return np.zeros((100, 300, 3), dtype=np.uint8)
+
+        h, w = crop.shape[:2]
+        vis = cv2.resize(crop, (w * scale, h * scale),
+                         interpolation=cv2.INTER_NEAREST)
+        vh, vw = vis.shape[:2]
+
+        # ── swatch strip ด้านบน ────────────────────────────────────────
+        swatch_h = 28
+        swatch   = np.zeros((swatch_h, vw, 3), dtype=np.uint8)
+        n = len(bands)
+        if n > 0:
+            sw = vw // n
+            for k, b in enumerate(bands):
+                bgr = _BAND_BGR.get(b['color'], _BAND_BGR['UNKNOWN'])
+                x1s, x2s = k * sw, (k + 1) * sw
+                swatch[:, x1s:x2s] = bgr
+                txt_col = (0, 0, 0) if sum(bgr) > 350 else (255, 255, 255)
+                cv2.putText(swatch, b['color'][:3],
+                            (x1s + 2, 18), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.45, txt_col, 1, cv2.LINE_AA)
+
+        # ── วาดเส้น + label บน vis ────────────────────────────────────
+        for b in bands:
+            cx  = b.get('x_crop', b['x'])
+            scx = int(cx * scale)
+            bgr = _BAND_BGR.get(b['color'], _BAND_BGR['UNKNOWN'])
+            # เส้นตั้งบาง + เส้นตั้งหนาโปร่งแสง
+            overlay = vis.copy()
+            cv2.line(overlay, (scx, 0), (scx, vh), bgr, max(2, scale))
+            vis = cv2.addWeighted(overlay, 0.45, vis, 0.55, 0)
+            cv2.line(vis, (scx, 0), (scx, vh), bgr, 1)
+            # label: ชื่อสี + H,S,V
+            h_v, s_v, v_v = (int(x) for x in b['mean_hsv'])
+            label = f"{b['color']} H{h_v}S{s_v}V{v_v}"
+            lx = max(1, scx - 2)
+            cv2.putText(vis, label, (lx, 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35,
+                        (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(vis, label, (lx, 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35,
+                        bgr, 1, cv2.LINE_AA)
+
+        # ── band strips แต่ละแถบ crop จริงจากรูปต้นฉบับ ──────────────
+        STRIP_H = 48  # ความสูง strip แต่ละเส้น (px)
+        STRIP_W = 32  # ความกว้าง strip แต่ละเส้น
+        GAP     = 4   # ช่องว่างระหว่าง strip
+        if bands:
+            strips = []
+            for b in bands:
+                cx   = b.get('x_crop', b['x'])
+                hw   = max(b.get('w', 6) // 2, 4)
+                x1c  = max(0, cx - hw)
+                x2c  = min(w, cx + hw)
+                patch = crop[:, x1c:x2c] if x2c > x1c else np.zeros((h, 4, 3), dtype=np.uint8)
+                patch_r = cv2.resize(patch, (STRIP_W, STRIP_H), interpolation=cv2.INTER_LINEAR)
+                bgr = _BAND_BGR.get(b['color'], _BAND_BGR['UNKNOWN'])
+                # border ด้วยสีของ band
+                cv2.rectangle(patch_r, (0, 0), (STRIP_W - 1, STRIP_H - 1), bgr, 2)
+                strips.append(patch_r)
+                if GAP > 0:
+                    strips.append(np.zeros((STRIP_H, GAP, 3), dtype=np.uint8))
+
+            strips_row = np.hstack(strips)
+            # pad ให้ตรงกับ vw
+            if strips_row.shape[1] < vw:
+                pad = np.zeros((STRIP_H, vw - strips_row.shape[1], 3), dtype=np.uint8)
+                strips_row = np.hstack([strips_row, pad])
+            else:
+                strips_row = strips_row[:, :vw]
+            # label "band crops" ซ้ายบน
+            cv2.putText(strips_row, "band crops", (2, 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (180, 180, 180), 1, cv2.LINE_AA)
+        else:
+            strips_row = np.zeros((STRIP_H, vw, 3), dtype=np.uint8)
+            cv2.putText(strips_row, "no bands", (4, 28),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (60, 60, 220), 1, cv2.LINE_AA)
+
+        # ── result label ด้านล่าง ─────────────────────────────────────
+        res_strip = np.zeros((22, vw, 3), dtype=np.uint8)
+        good = result not in ("Unknown", "Read Error", "Calc Error", "?", "")
+        rc   = (0, 220, 80) if good else (60, 60, 220)
+        cv2.putText(res_strip, result, (4, 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, rc, 1, cv2.LINE_AA)
+
+        return np.vstack([swatch, strips_row, vis, res_strip])
+
+    # ── 4. Band scanning ──────────────────────────────────────────────────────
     def _scan_bands(self, roi: np.ndarray) -> List[Dict]:
-        # ── Pre-processing ────────────────────────────────────
-        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(4, 4))
-        l = clahe.apply(l)
-        roi_bright = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
+        h, w = roi.shape[:2]
 
-        # ── Detect band locations ─────────────────────────────
-        band_locs = self.detector.detect_bands_projection(roi_bright)
+        # CLAHE บน LAB เพื่อเพิ่ม local contrast ก่อน detect (หลักการเดิม)
+        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+        l, a, b_ch = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        roi_enh = cv2.cvtColor(cv2.merge((l, a, b_ch)), cv2.COLOR_LAB2BGR)
+
+        band_locs = self.detector.detect_bands_adaptive(roi_enh)
+        if len(band_locs) < 3:
+            proj_locs = self.detector.detect_bands_projection(roi_enh)
+            if len(proj_locs) > len(band_locs):
+                band_locs = proj_locs
         if not band_locs:
             return []
 
-        h, w = roi.shape[:2]
+        # Sample color จากภาพ enhanced เดียวกัน, แค่ 30-70% กลาง (หลีก specular)
+        hsv_roi = cv2.cvtColor(roi_enh, cv2.COLOR_BGR2HSV)
+        ys, ye  = max(0, int(h * 0.30)), min(h, int(h * 0.70))
+        if ye <= ys:
+            ys, ye = 0, h
 
-        # ── Multi-strip sampling: sample หลาย row แล้ว vote ──
-        # แทนที่จะ sample แค่ช่วง y เดียว ให้ sample หลายแถว
-        # แล้วเอาสีที่โหวตชนะในแต่ละ band
-        strip_centers = [0.30, 0.40, 0.50, 0.60, 0.70]
-        strip_half_h  = int(h * 0.06)   # ความสูงของแต่ละ strip
-
-        hsv_roi = cv2.cvtColor(roi_bright, cv2.COLOR_BGR2HSV)
-
-        detected_bands = []
+        bands = []
         for loc in band_locs:
-            cx     = loc['x']
-            w_band = loc['w']
-
-            # กว้างของ sample region = ครึ่งหนึ่งของ band width
-            # (ป้องกันติดสีข้างเคียง)
-            safe_half = max(1, w_band // 3)
-            x1 = max(0, cx - safe_half)
-            x2 = min(w, cx + safe_half)
-
-            # เก็บ HSV mean จากแต่ละ strip
-            strip_hsv_list = []
-            for yc_pct in strip_centers:
-                yc = int(h * yc_pct)
-                ys = max(0, yc - strip_half_h)
-                ye = min(h, yc + strip_half_h)
-                patch = hsv_roi[ys:ye, x1:x2]
-                if patch.size == 0:
-                    continue
-                # เอา median แทน mean เพื่อลด outlier จาก glare
-                strip_hsv_list.append(np.median(
-                    patch.reshape(-1, 3), axis=0))
-
-            if not strip_hsv_list:
+            cx, w_band = loc['x'], loc['w']
+            x1 = max(0, cx - max(1, w_band // 4))
+            x2 = min(w, cx + max(1, w_band // 4))
+            patch = hsv_roi[ys:ye, x1:x2]
+            if patch.size == 0:
                 continue
-
-            # Vote: แต่ละ strip โหวตสี → เอาสีที่ชนะมากที่สุด
-            color_votes: Dict[str, int] = {}
-            for hsv_val in strip_hsv_list:
-                color = self.detector.closest_color(hsv_val)
-                color_votes[color] = color_votes.get(color, 0) + 1
-
-            # สีที่ชนะ
-            winner_color = max(color_votes, key=color_votes.get)
-
-            # mean HSV สำหรับ fix_false_colors
-            mean_hsv = tuple(np.mean(strip_hsv_list, axis=0))
-            val = COLOR_VALS.get(winner_color, -99)
-
-            detected_bands.append({
-                'color':    winner_color,
-                'val':      val,
+            mean_hsv = tuple(cv2.mean(patch)[:3])
+            color    = self.detector.closest_color(mean_hsv)
+            bands.append({
+                'color':    color,
+                'val':      COLOR_VALS.get(color, -99),
                 'x':        cx,
                 'w':        w_band,
                 'mean_hsv': mean_hsv,
-                'votes':    color_votes
             })
+        return bands
 
-        return detected_bands
+    # ── 5. Ohm calculation (4-band and 5-band) ───────────────────────────────
+    _TOL_4 = {'GOLD': '5%', 'SILVER': '10%', 'BROWN': '1%'}
+    _TOL_5 = {'GOLD': '5%', 'SILVER': '10%', 'BROWN': '1%',
+               'RED': '2%', 'GREEN': '0.5%', 'BLUE': '0.25%', 'VIOLET': '0.1%'}
 
-    # ──────────────────────────────────────────────────────────
-    # 5. Calculate Ohms from bands
-    # ──────────────────────────────────────────────────────────
     def _calculate_ohms(self, bands: List[Dict]) -> Tuple[str, List[Dict], float]:
         if len(bands) < 3:
             return "Unknown", bands, 0.0
 
-        # ── แก้ทิศทางการอ่าน (Gold/Silver ไม่ใช่แถบแรก) ──────
-        if bands[0]['color'] in ['GOLD', 'SILVER']:
-            bands.reverse()
+        last_color = bands[-1]['color']
+        n = len(bands)
 
-        tolerance  = "20%"
-        calc_bands = bands.copy()
-
-        # ── แยก tolerance band ออกจากท้าย ─────────────────────
-        last = bands[-1]
-        if last['color'] == 'GOLD':
-            tolerance  = "5%"
-            calc_bands = bands[:-1]
-        elif last['color'] == 'SILVER':
-            tolerance  = "10%"
-            calc_bands = bands[:-1]
-        elif last['color'] == 'BROWN':
-            # 5-band precision resistor: last band = 1% tolerance
-            tolerance  = "1%"
-            calc_bands = bands[:-1]
-
-        if len(calc_bands) < 2:
-            return "Error", bands, 0.0
+        # ── ตรวจรูปแบบ 4-band vs 5-band ──────────────────────────────────────
+        if n >= 5 and last_color in self._TOL_5:
+            tolerance, calc_bands, five_band = self._TOL_5[last_color], bands[:-1], True
+        elif n >= 4 and last_color in self._TOL_4:
+            calc = bands[:-1]
+            five_band  = len(calc) >= 4
+            tolerance, calc_bands = self._TOL_4[last_color], calc
+        elif n == 5:
+            tolerance, calc_bands, five_band = "20%", bands, True
+        else:
+            tolerance, calc_bands, five_band = "20%", bands, False
 
         try:
-            digit1 = calc_bands[0]['val']
-            digit2 = calc_bands[1]['val']
+            if five_band and len(calc_bands) >= 4:
+                d1, d2, d3, mul = (calc_bands[i]['val'] for i in range(4))
+                if -99 in (d1, d2, d3, mul):
+                    return "Read Error", bands, 0.0
+                base = d1 * 100 + d2 * 10 + d3
+            else:
+                d1, d2 = calc_bands[0]['val'], calc_bands[1]['val']
+                mul = calc_bands[2]['val'] if len(calc_bands) >= 3 else 0
+                if -99 in (d1, d2, mul):
+                    return "Read Error", bands, 0.0
+                base = d1 * 10 + d2
 
-            multiplier_idx = calc_bands[2]['val'] if len(calc_bands) >= 3 else 0
-
-            if -99 in [digit1, digit2, multiplier_idx]:
+            multiplier = 10 ** mul if mul >= 0 else (0.1 if mul == -1 else 0.01)
+            ohms = base * multiplier
+            if ohms <= 0 or ohms > 10e6:
                 return "Read Error", bands, 0.0
 
-            if multiplier_idx >= 0:
-                multiplier = 10 ** multiplier_idx
-            elif multiplier_idx == -1:
-                multiplier = 0.1
-            elif multiplier_idx == -2:
-                multiplier = 0.01
-            else:
-                multiplier = 1
-
-            total_ohms = ((digit1 * 10) + digit2) * multiplier
-
-            if total_ohms <= 0 or total_ohms > 10e6:
-                return "Read Error", bands, 0.0
-
-            if total_ohms >= 1e6:
-                formatted = f"{total_ohms / 1e6:.2f}M Ohms +/-{tolerance}"
-            elif total_ohms >= 1e3:
-                formatted = f"{total_ohms / 1e3:.2f}k Ohms +/-{tolerance}"
-            else:
-                formatted = f"{total_ohms:.1f} Ohms +/-{tolerance}"
-
-            return formatted, bands, total_ohms
+            if   ohms >= 1e6: label = f"{ohms/1e6:.2f}M Ohms +-{tolerance}"
+            elif ohms >= 1e3: label = f"{ohms/1e3:.2f}k Ohms +-{tolerance}"
+            else:             label = f"{ohms:.1f} Ohms +-{tolerance}"
+            return label, bands, ohms
 
         except Exception as e:
-            print(f"Calculation error: {e}")
+            print(f"Calc error: {e}")
             return "Calc Error", bands, 0.0

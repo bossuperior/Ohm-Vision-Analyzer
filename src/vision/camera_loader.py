@@ -15,6 +15,7 @@ class CameraLoader:
         self.frame = None
         self.is_running = False
         self.thread = None
+        self.lock = threading.Lock()
 
     def start(self):
         self.cap = cv2.VideoCapture(self.camera_id, cv2.CAP_DSHOW)
@@ -42,16 +43,18 @@ class CameraLoader:
         while self.is_running:
             ret, frame = self.cap.read()
             if ret:
-                self.ret = ret
-                self.frame = frame
+                with self.lock:
+                    self.ret = ret
+                    self.frame = frame
             else:
                 # Prevent CPU spin if camera drops a frame
                 time.sleep(0.01)
 
     def get_frame(self):
-        if not self.ret or self.frame is None:
-            return None
-        return self.frame.copy() 
+        with self.lock:
+            if not self.ret or self.frame is None:
+                return None
+            return self.frame.copy()
 
     def stop(self):
         self.is_running = False

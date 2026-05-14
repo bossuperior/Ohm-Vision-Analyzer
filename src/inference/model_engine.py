@@ -1,93 +1,25 @@
 import numpy as np
 from ultralytics import YOLO
 
-class DetectionResult: #Result Data Structure
+
+class DetectionResult:
     def __init__(self, boxes, keypoints, class_ids, scores=None):
-        self.boxes = boxes
-        self.keypoints = keypoints
-        self.class_ids = class_ids
-        self.scores = scores if scores is not None else np.ones(len(class_ids))
+        self.boxes      = boxes
+        self.keypoints  = keypoints
+        self.class_ids  = class_ids
+        self.scores     = scores if scores is not None else np.ones(len(class_ids))
 
-    def has_board(self):
-        # Check if any detected object is the board (class_id == 0)
-        return 0 in self.class_ids
 
-    def get_board_corners(self):
-        # Get the 4 corner points of the board
-        board_idx = np.where(self.class_ids == 0)[0][0]
-        return self.keypoints[board_idx][:4]
-
-    def get_all_keypoints(self):
-        # Return all keypoints for further analysis (e.g., circuit topology)
-        return self.keypoints
-
-# =====================
-# THE ONNX MODEL ENGINE
-# =====================
 class ModelEngine:
-    def __init__(self, model_path, model_type="yolov8", **kwargs):
-        self.model_type = model_type.lower()
-        self.model_path = model_path
-        self.providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-        
-        print(f" Initializing ONNX Model Engine: {self.model_type.upper()}")
-        
-        if self.model_type == "yolov8":
-            self.engine = YOLO(self.model_path, task="pose")
-            print(f" Yolov8n Pose model (ONNX) loaded successfully")
-        elif self.model_type == "rtm-pose":
-            self.engine = self._init_rtmpose(**kwargs)
-        elif self.model_type == "higherhrnet":
-            self.engine = self._init_higherhrnet(**kwargs)
-        else:
-            raise ValueError(f" Not supported: {self.model_type}")
+    def __init__(self, model_path: str, conf: float = 0.75, iou: float = 0.45):
+        self.engine = YOLO(model_path, task="pose")
+        self._conf  = conf
+        self._iou   = iou
 
-    # --------------------------
-    # 1. YOLOv8 POSE ONNX ENGINE
-    # --------------------------
-    def _predict_yolo(self, frame):
-        results = self.engine(frame, verbose=False, conf=0.75, iou=0.45)[0]
-        
-        boxes     = results.boxes.xyxy.cpu().numpy()    if results.boxes     else np.array([])
-        class_ids = results.boxes.cls.cpu().numpy()     if results.boxes     else np.array([])
-        scores    = results.boxes.conf.cpu().numpy()    if results.boxes     else np.array([])
-        # data shape: (N, K, 3) → x, y, conf per keypoint
-        keypoints = results.keypoints.data.cpu().numpy() if results.keypoints else np.array([])
-
+    def predict(self, frame) -> DetectionResult:
+        r = self.engine(frame, verbose=False, conf=self._conf, iou=self._iou)[0]
+        boxes     = r.boxes.xyxy.cpu().numpy()      if r.boxes     else np.array([])
+        class_ids = r.boxes.cls.cpu().numpy()       if r.boxes     else np.array([])
+        scores    = r.boxes.conf.cpu().numpy()      if r.boxes     else np.array([])
+        keypoints = r.keypoints.data.cpu().numpy()  if r.keypoints else np.array([])
         return DetectionResult(boxes, keypoints, class_ids, scores)
-
-    # -----------------------
-    # 2. RTM-POSE ONNX ENGINE
-    # -----------------------
-    def _init_rtmpose(self, **kwargs):
-        print(" Preparing RTM-Pose environment...")
-        return None
-
-    def _predict_rtmpose(self, frame):
-        return DetectionResult(np.array([]), np.array([]), np.array([]))
-
-    # --------------------------
-    # 3. HigherHRNet ONNX ENGINE
-    # --------------------------
-    def _init_higherhrnet(self, **kwargs):
-        print(" Preparing HigherHRNet environment...")
-        return None
-
-    def _predict_higherhrnet(self, frame):
-        return DetectionResult(np.array([]), np.array([]), np.array([]))
-
-    # ==========================
-    # PUBLIC METHOD
-    # ==========================
-    def predict(self, frame):
-        if self.model_type == "yolov8":
-            return self._predict_yolo(frame)
-        elif self.model_type == "rtm-pose":
-            return self._predict_rtmpose(frame)
-        elif self.model_type == "higherhrnet":
-            return self._predict_higherhrnet(frame)
-
-    def release_resources(self):
-        if hasattr(self, 'engine') and self.engine is not None:
-            del self.engine
-        print(f" Resources for {self.model_type.upper()} released. Memory cleared.")

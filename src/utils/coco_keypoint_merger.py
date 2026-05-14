@@ -114,20 +114,20 @@ class CocoKeypointMerger:
                 json.dump(self.merged_data, f, indent=4)
                 
             print("\n" + "="*50)
-            print("✅ Merge & Keypoint Sorting completed successfully!")
-            print(f"📁 Saved output to  : {self.output_filename}")
-            print(f"🖼️ Total images     : {len(self.merged_data['images'])}")
-            print(f"🎯 Total annotations: {len(self.merged_data['annotations'])}")
-            print(f"🧹 Auto-sorted categories: {self.categories_to_sort}")
+            print(" Merge & Keypoint Sorting completed successfully!")
+            print(f" Saved output to  : {self.output_filename}")
+            print(f" Total images     : {len(self.merged_data['images'])}")
+            print(f" Total annotations: {len(self.merged_data['annotations'])}")
+            print(f" Auto-sorted categories: {self.categories_to_sort}")
             print("="*50)
         except Exception as e:
-            print(f"⚠️ Warning: Failed to save output - {e}")
+            print(f" Warning: Failed to save output - {e}")
 
     def merge(self):
         """Main execution pipeline."""
         for file_path in self.json_files:
             if not os.path.exists(file_path):
-                print(f"⚠️ Warning: File not found -> {file_path}")
+                print(f" Warning: File not found -> {file_path}")
                 continue
                 
             print(f"Processing file: {file_path}")

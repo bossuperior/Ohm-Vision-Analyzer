@@ -1,6 +1,9 @@
+import re
 import cv2
-import json
-import os
+import time
+import collections
+import threading
+from collections import Counter
 import numpy as np
 import tkinter as tk
 from PIL import Image, ImageTk
@@ -9,96 +12,34 @@ from src.vision.camera_loader import CameraLoader
 from src.inference.model_engine import ModelEngine
 from src.vision.breadboard_warper import BreadboardWarper
 from src.topology.grid_mapper import GridMapper
-
-CONFIG_PATH = "config/ui_state.json"
-
-# ── Colors ────────────────────────────────────────────────────────────────────
-BOX_COLORS = {
-    "resistor": (0, 200, 255),
-    "wire":     (255, 180, 0),
-}
-DEFAULT_BOX_COLOR = (180, 180, 180)
-
-RESISTOR_KP_COLORS = [
-    (0, 0, 255),   # Leg_0  — red
-    (0, 0, 255),   # Leg_1  — red
-    (0, 255, 0),   # Body_2 — green
-    (0, 255, 0),   # Body_3 — green
-]
-
-# ── Drawing helpers ────────────────────────────────────────────────────────────
-def transform_points(pts, matrix):
-    if len(pts) == 0:
-        return pts
-    src = np.array(pts, dtype=np.float32).reshape(-1, 1, 2)
-    return cv2.perspectiveTransform(src, matrix).reshape(-1, 2)
+from src.topology.circuit_analyzer import CircuitAnalyzer
+from src.vision.band_reader import BandReader
+from src.ui.renderer import draw_results
+from src.ui.build_ui import UIBuilderMixin
+from src.ui.callback import CallbackMixin
+from config.configs import BG, GREEN, RED, DIM
+import config.configs as configs
 
 
-def transform_box(box, matrix):
-    x1, y1, x2, y2 = box
-    corners = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32)
-    t = transform_points(corners, matrix)
-    return int(t[:, 0].min()), int(t[:, 1].min()), \
-           int(t[:, 0].max()), int(t[:, 1].max())
-
-
-def draw_results(frame, results, class_names, matrix=None):
-    for i, (box, cls_id, score) in enumerate(
-            zip(results.boxes, results.class_ids, results.scores)):
-        name  = class_names.get(int(cls_id), f"cls{int(cls_id)}")
-        color = BOX_COLORS.get(name, DEFAULT_BOX_COLOR)
-
-        if matrix is not None:
-            x1, y1, x2, y2 = transform_box(box, matrix)
-        else:
-            x1, y1, x2, y2 = map(int, box)
-
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(frame, f"{name} {score:.2f}",
-                    (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-
-        if len(results.keypoints) > i:
-            kp_data     = results.keypoints[i]
-            is_resistor = (name == "resistor")
-            raw_kps     = [(j, kp[:2]) for j, kp in enumerate(kp_data) if kp[2] > 0.5]
-            xy_only     = [kp for _, kp in raw_kps]
-
-            if matrix is not None and xy_only:
-                xy_only = transform_points(xy_only, matrix)
-
-            kp_map = {j: tuple(map(int, xy_only[k])) for k, (j, _) in enumerate(raw_kps)}
-
-            for j, pt in kp_map.items():
-                c = RESISTOR_KP_COLORS[j] if is_resistor and j < len(RESISTOR_KP_COLORS) \
-                    else (0, 255, 255)
-                cv2.circle(frame, pt, 5, c, -1)
-
-            if is_resistor and 2 in kp_map and 3 in kp_map:
-                cv2.line(frame, kp_map[2], kp_map[3], (0, 255, 0), 2)
-
-
-# ── Dark-theme palette ─────────────────────────────────────────────────────────
-BG       = "#1a1a2e"
-PANEL_BG = "#16213e"
-ACCENT   = "#0f3460"
-TEXT     = "#e0e0e0"
-DIM      = "#888888"
-GREEN    = "#4ade80"
-RED      = "#f87171"
-
-# Default slider values
-DEFAULTS = {
-    "margin":  80,
-    "shift_x": 100,   # raw var (shift_x + 100)
-    "shift_y": 100,
-    "off_x":   0,
-    "off_y":   0,
-    "pitch_x": 254,   # ×10
-    "pitch_y": 274,
+_CIRCUIT_COLORS = {
+    'Series':            '#fbbf24',
+    'Parallel':          '#38bdf8',
+    'Wheatstone Bridge': '#e879f9',
+    'Mixed':             '#fb923c',
+    'Ring':              '#c084fc',
+    'Single':            '#a3e635',
+    'Not Connected':     '#888888',
 }
 
+def _parse_ohms(label: str) -> float:
+    m = re.match(r'([0-9.]+)(k|M)?\s+Ohm', label)
+    if not m:
+        return 0.0
+    v, p = float(m.group(1)), m.group(2) or ''
+    return v * (1e3 if p == 'k' else 1e6 if p == 'M' else 1.0)
 
-class OhmVisionApp:
+
+class OhmVisionApp(UIBuilderMixin, CallbackMixin):
     def __init__(self, window):
         self.window = window
         self.window.title("Ohm-Vision Analyzer")
@@ -107,259 +48,290 @@ class OhmVisionApp:
         self.window.minsize(900, 600)
 
         self._fullscreen = False
-        self._cfg = self._load_config()
+        self._cfg        = configs.load_ui_state()
+
+        self._cal_active  = False
+        self._last_warped = None
+        self._lb          = (1.0, 0, 0)
+
+        self.band_reader        = BandReader()
+        self.circuit_analyzer   = CircuitAnalyzer()
+        self._ohm_cache         = {}
+        self._ohm_numeric       = {}  # idx → float (Ω)
+        self._ohm_votes         = {}  # idx → deque of recent readings
+        self._band_thread       = None
+
+        self._topo_votes  = collections.deque(maxlen=5)   # majority-vote circuit type
+        self._stable_info = {'type': '—', 'total_ohms': 0.0, 'formula': '', 'extra': {}}
+
+        self._fps_times = collections.deque(maxlen=30)
+        self._padded    = None
 
         self.camera      = CameraLoader(camera_id=1, width=1280, height=720)
-        self.engine      = ModelEngine(model_path="models/Yolo_v8n_pose_weights.onnx",
-                                       model_type="yolov8")
+        self.engine      = ModelEngine("models/Yolo_v8s_pose_weights.onnx")
         self.transformer = BreadboardWarper(output_width=810, output_height=540)
         self.grid_mapper = GridMapper(target_w=810, target_h=540)
         self.class_names = self.engine.engine.names
         self.show_grid   = False
 
+        # Inference pipeline runs in a background thread so tkinter never blocks
+        self._stop_event  = threading.Event()
+        self._raw_lock    = threading.Lock()
+        self._raw_frame   = None
+        self._result_lock = threading.Lock()
+        self._infer_pkg   = None   # (success: bool, base: ndarray, results: DetectionResult)
+        self._infer_new   = False
+
         self._build_ui()
         self._apply_warp()
         self._apply_grid()
+        configs.load_color_refs()
+        self._update_cal_swatch()
 
-        self.window.bind("<q>",   lambda e: self.on_closing())
-        self.window.bind("<Q>",   lambda e: self.on_closing())
-        self.window.bind("<g>",   lambda e: self._toggle_grid())
-        self.window.bind("<G>",   lambda e: self._toggle_grid())
-        self.window.bind("<F11>", lambda e: self._toggle_fullscreen())
+        self.canvas.bind("<Button-1>", self._on_canvas_click)
+        self.window.bind("<q>",      lambda e: self.on_closing())
+        self.window.bind("<Q>",      lambda e: self.on_closing())
+        self.window.bind("<g>",      lambda e: self._toggle_grid())
+        self.window.bind("<G>",      lambda e: self._toggle_grid())
+        self.window.bind("<F11>",    lambda e: self._toggle_fullscreen())
         self.window.bind("<Escape>", lambda e: self._exit_fullscreen())
         self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         self.camera.start()
-        self.window.after(50, self._update_frame)
+        self._infer_thread = threading.Thread(target=self._inference_loop, daemon=True)
+        self._infer_thread.start()
+        self.window.after(33, self._update_frame)
 
-    # ── Config persistence ─────────────────────────────────────────────────────
-    def _load_config(self):
-        if os.path.exists(CONFIG_PATH):
-            try:
-                with open(CONFIG_PATH, "r") as f:
-                    data = json.load(f)
-                    return {k: data.get(k, DEFAULTS[k]) for k in DEFAULTS}
-            except Exception:
-                pass
-        return dict(DEFAULTS)
-
-    def _save_config(self):
-        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-        state = {
-            "margin":  self.var_margin.get(),
-            "shift_x": self.var_shift_x.get(),
-            "shift_y": self.var_shift_y.get(),
-            "off_x":   self.var_off_x.get(),
-            "off_y":   self.var_off_y.get(),
-            "pitch_x": self.var_pitch_x.get(),
-            "pitch_y": self.var_pitch_y.get(),
-        }
-        with open(CONFIG_PATH, "w") as f:
-            json.dump(state, f, indent=2)
-
-    # ── Fullscreen ─────────────────────────────────────────────────────────────
     def _toggle_fullscreen(self):
         self._fullscreen = not self._fullscreen
         self.window.attributes("-fullscreen", self._fullscreen)
-        hint = "[Q] Quit   [G] Grid   [F11] Fullscreen   [Esc] Exit Fullscreen"
-        self.hint_label.config(text=hint)
 
     def _exit_fullscreen(self):
         if self._fullscreen:
             self._fullscreen = False
             self.window.attributes("-fullscreen", False)
 
-    # ── UI construction ────────────────────────────────────────────────────────
-    def _build_ui(self):
-        # Header
-        hdr = tk.Frame(self.window, bg=ACCENT, height=48)
-        hdr.pack(fill="x")
-        hdr.pack_propagate(False)
-        tk.Label(hdr, text="Ohm-Vision Analyzer",
-                 font=("Arial", 15, "bold"), bg=ACCENT, fg="white").pack(side="left", padx=16, pady=12)
-        self.status_badge = tk.Label(hdr, text="  SEARCHING  ",
-                                     font=("Arial", 10, "bold"),
-                                     bg=RED, fg="white", padx=6)
-        self.status_badge.pack(side="right", padx=16, pady=13)
+    def _start_band_worker(self, warped_snap, kp_snap, cls_snap):
+        VOTE_SIZE   = 7   # เก็บ 7 ครั้งล่าสุด
+        VOTE_THRESH = 4   # ต้องตรงกันอย่างน้อย 4 ครั้งจึงแสดง
+        BAD = {"?", "ERR", "Unknown", "Read Error", "Calc Error", "Error"}
 
-        # Body
-        body = tk.Frame(self.window, bg=BG)
-        body.pack(fill="both", expand=True, padx=10, pady=8)
+        def worker():
+            for idx, cls_id in enumerate(cls_snap):
+                if int(cls_id) != 0 or idx >= len(kp_snap):
+                    continue
+                try:
+                    crop = self.band_reader.crop_from_keypoints(warped_snap, kp_snap[idx])
+                    if crop is not None:
+                        cv2.imwrite(f"debug_crop_{idx}.jpg", crop)
+                        res, bands, _ = self.band_reader.calculate(crop)
+                        debug_img = self.band_reader.annotate_crop(crop, bands, res)
+                        cv2.imwrite(f"debug_bands_{idx}.jpg", debug_img)
+                        hsv_str = [(b['color'], int(b['mean_hsv'][0]), int(b['mean_hsv'][1]), int(b['mean_hsv'][2])) for b in bands]
+                        print(f"[Band{idx}] {hsv_str} → {res}")
+                    else:
+                        res = "?"
+                        print(f"[Band{idx}] crop=None")
+                except Exception as e:
+                    res = "?"
+                    print(f"[Band] idx={idx} error: {e}")
 
-        # Left: canvas (expands with window)
-        left = tk.Frame(body, bg=BG)
-        left.pack(side="left", fill="both", expand=True)
+                buf = self._ohm_votes.setdefault(idx, collections.deque(maxlen=VOTE_SIZE))
+                buf.append(res)
+                print(f"[Vote{idx}] buf={list(buf)}")
 
-        self.canvas = tk.Canvas(left, bg="#000",
-                                highlightthickness=2, highlightbackground=ACCENT)
-        self.canvas.pack(fill="both", expand=True)
+                winner, freq = Counter(buf).most_common(1)[0]
+                if freq >= VOTE_THRESH and winner not in BAD:
+                    self._ohm_cache[idx]   = winner
+                    self._ohm_numeric[idx] = _parse_ohms(winner)
+                elif all(r in BAD for r in buf):
+                    self._ohm_cache[idx] = "?"
+                    self._ohm_numeric.pop(idx, None)
 
-        self.hint_label = tk.Label(
-            left,
-            text="[Q] Quit   [G] Grid   [F11] Fullscreen   [Esc] Exit Fullscreen",
-            font=("Consolas", 9), bg=BG, fg=DIM)
-        self.hint_label.pack(pady=4)
+        self._band_thread = threading.Thread(target=worker, daemon=True)
+        self._band_thread.start()
 
-        # Right: fixed-width control panel
-        panel = tk.Frame(body, bg=PANEL_BG, width=220, relief="flat")
-        panel.pack(side="right", fill="y", padx=(10, 0))
-        panel.pack_propagate(False)
+    def _inference_loop(self):
+        """Background thread: ArUco warp + YOLO inference. Never touches tkinter."""
+        while not self._stop_event.is_set():
+            with self._raw_lock:
+                frame = self._raw_frame
+            if frame is None:
+                time.sleep(0.002)
+                continue
 
-        tk.Label(panel, text="Controls", font=("Arial", 12, "bold"),
-                 bg=PANEL_BG, fg=TEXT).pack(pady=(14, 6))
+            success, warped, _ = self.transformer.process(frame)
+            if success:
+                self._last_warped = warped
+                results = self.engine.predict(warped)
+                base    = warped
+            else:
+                base    = cv2.resize(frame, (810, 540), interpolation=cv2.INTER_NEAREST)
+                results = self.engine.predict(base)
 
-        self._divider(panel)
-        self._section_label(panel, "Warp")
-        self.var_margin  = tk.IntVar(value=self._cfg["margin"])
-        self.var_shift_x = tk.IntVar(value=self._cfg["shift_x"])
-        self.var_shift_y = tk.IntVar(value=self._cfg["shift_y"])
-        self._slider(panel, "Margin",  self.var_margin,  0, 300, self._apply_warp)
-        self._slider(panel, "Shift X", self.var_shift_x, 0, 200, self._apply_warp)
-        self._slider(panel, "Shift Y", self.var_shift_y, 0, 200, self._apply_warp)
+            with self._result_lock:
+                self._infer_pkg = (success, base.copy(), results)
+                self._infer_new = True
 
-        self._divider(panel)
-        self._section_label(panel, "Grid")
-        self.var_off_x   = tk.IntVar(value=self._cfg["off_x"])
-        self.var_off_y   = tk.IntVar(value=self._cfg["off_y"])
-        self.var_pitch_x = tk.IntVar(value=self._cfg["pitch_x"])
-        self.var_pitch_y = tk.IntVar(value=self._cfg["pitch_y"])
-        self._slider(panel, "Off X",   self.var_off_x,   0, 200, self._apply_grid)
-        self._slider(panel, "Off Y",   self.var_off_y,   0, 200, self._apply_grid)
-        self._slider(panel, "Pitch X", self.var_pitch_x, 0, 500, self._apply_grid)
-        self._slider(panel, "Pitch Y", self.var_pitch_y, 0, 500, self._apply_grid)
-
-        self._divider(panel)
-
-        btn_area = tk.Frame(panel, bg=PANEL_BG)
-        btn_area.pack(fill="x", padx=12, pady=10)
-
-        self.btn_grid = tk.Button(btn_area, text="Grid  OFF",
-                                  command=self._toggle_grid,
-                                  bg=ACCENT, fg="white",
-                                  font=("Arial", 10), relief="flat",
-                                  activebackground="#1a4a8a",
-                                  cursor="hand2", height=2)
-        self.btn_grid.pack(fill="x", pady=(0, 6))
-
-        tk.Button(btn_area, text="Quit",
-                  command=self.on_closing,
-                  bg="#7f1d1d", fg="white",
-                  font=("Arial", 10), relief="flat",
-                  activebackground="#991b1b",
-                  cursor="hand2", height=2).pack(fill="x")
-
-        self._divider(panel)
-        self.readout = tk.Label(panel, text="",
-                                font=("Consolas", 8), bg=PANEL_BG,
-                                fg=DIM, justify="left")
-        self.readout.pack(padx=12, pady=6, anchor="w")
-
-    # ── Widget helpers ─────────────────────────────────────────────────────────
-    def _divider(self, parent):
-        tk.Frame(parent, bg="#2a2a4a", height=1).pack(fill="x", padx=8, pady=4)
-
-    def _section_label(self, parent, text):
-        tk.Label(parent, text=text, font=("Arial", 9, "bold"),
-                 bg=PANEL_BG, fg=DIM).pack(anchor="w", padx=14, pady=(2, 0))
-
-    def _slider(self, parent, label, var, lo, hi, cmd):
-        row = tk.Frame(parent, bg=PANEL_BG)
-        row.pack(fill="x", padx=10, pady=1)
-        tk.Label(row, text=label, width=7, anchor="w",
-                 font=("Arial", 8), bg=PANEL_BG, fg=TEXT).pack(side="left")
-        tk.Scale(row, variable=var, from_=lo, to=hi,
-                 orient="horizontal", length=118, showvalue=False,
-                 bg=PANEL_BG, fg=TEXT, troughcolor=ACCENT,
-                 highlightthickness=0, sliderlength=14, bd=0,
-                 command=lambda _: cmd()).pack(side="left")
-        tk.Label(row, textvariable=var, width=4,
-                 font=("Consolas", 8), bg=PANEL_BG, fg=GREEN).pack(side="left")
-
-    # ── Callbacks ──────────────────────────────────────────────────────────────
-    def _apply_warp(self):
-        self.transformer.margin  = self.var_margin.get()
-        self.transformer.shift_x = self.var_shift_x.get() - 100
-        self.transformer.shift_y = self.var_shift_y.get() - 100
-
-    def _apply_grid(self):
-        self.grid_mapper.set_params(
-            self.var_off_x.get(), self.var_off_y.get(),
-            pitch_x=self.var_pitch_x.get() / 10.0,
-            pitch_y=self.var_pitch_y.get() / 10.0,
-        )
-
-    def _toggle_grid(self):
-        self.show_grid = not self.show_grid
-        if self.show_grid:
-            self.btn_grid.config(text="Grid  ON", bg="#166534")
-        else:
-            self.btn_grid.config(text="Grid  OFF", bg=ACCENT)
-
-    # ── Main update loop ───────────────────────────────────────────────────────
     def _update_frame(self):
+        # Push latest camera frame to inference thread
         frame = self.camera.get_frame()
         if frame is not None:
-            success, warped, _ = self.transformer.process(frame)
+            with self._raw_lock:
+                self._raw_frame = frame
 
-            if success:
-                # Predict on warped frame — same domain as training data
-                results = self.engine.predict(warped)
-                display = warped.copy()
-                if self.show_grid:
-                    display = self.grid_mapper.draw_grid_overlay(display)
-                draw_results(display, results, self.class_names, matrix=None)
-                cv2.putText(display, "BOARD OK",
-                            (12, 32), cv2.FONT_HERSHEY_DUPLEX, 1.0, (0, 220, 80), 2)
-                self.status_badge.config(text="  BOARD OK  ", bg=GREEN, fg="#052e16")
+        # Pull latest inference result (non-blocking)
+        with self._result_lock:
+            pkg    = self._infer_pkg
+            is_new = self._infer_new
+            if is_new:
+                self._infer_new = False
+
+        if pkg is None:
+            self.window.after(33, self._update_frame)
+            return
+
+        success, base, results = pkg
+
+        # Trigger band reading on every new inference result (rate-limited by thread alive check)
+        if is_new and success and (self._band_thread is None or not self._band_thread.is_alive()):
+            kp_len = len(results.keypoints)
+            self._start_band_worker(
+                base.copy(),
+                results.keypoints.copy() if kp_len > 0 else np.array([]),
+                results.class_ids.copy())
+
+        display = base.copy()
+
+        if success:
+            if self.show_grid:
+                display = self.grid_mapper.draw_grid_overlay(display)
+            draw_results(display, results, self.class_names, ohm_map=self._ohm_cache)
+            cv2.putText(display, "BOARD OK",
+                        (12, 32), cv2.FONT_HERSHEY_DUPLEX, 1.0, (0, 220, 80), 2)
+            self.status_badge.config(text="  BOARD OK  ", bg=GREEN, fg="#052e16")
+
+            # Circuit topology — wires merge electrical nodes via Union-Find
+            resistor_ids = {idx for idx, cid in enumerate(results.class_ids) if int(cid) == 0}
+            wire_ids     = {idx for idx, cid in enumerate(results.class_ids) if int(cid) == 1}
+            all_kp_data  = [
+                {'id': idx, 'keypoints': kps}
+                for idx, (_, kps) in enumerate(
+                    zip(results.class_ids, results.keypoints))
+                if len(kps) >= 2
+            ]
+            if resistor_ids and all_kp_data:
+                all_mapped = self.grid_mapper.map_to_holes(all_kp_data)
+                resistors  = self.circuit_analyzer.apply_wires(all_mapped, wire_ids)
+                resistors  = [c for c in resistors if c['id'] in resistor_ids]
+                for c in resistors:
+                    c['ohms'] = self._ohm_numeric.get(c['id'], 0.0)
+                info = self.circuit_analyzer.analyze(resistors)
+
+                # Majority-vote over last 5 inference results to suppress flip-flop
+                self._topo_votes.append(info['type'])
+                voted_type = Counter(self._topo_votes).most_common(1)[0][0]
+                if info['type'] == voted_type:
+                    self._stable_info = info   # accept when current matches majority
+
+                self._update_circuit_ui(self._stable_info)
+                t_display = self._stable_info['type']
+                if t_display not in ('—',):
+                    col = _CIRCUIT_COLORS.get(t_display, '#888888')
+                    bgr = tuple(int(col[i:i+2], 16) for i in (5, 3, 1))
+                    cv2.putText(display, t_display,
+                                (12, 64), cv2.FONT_HERSHEY_DUPLEX, 0.9, bgr, 2)
+        else:
+            draw_results(display, results, self.class_names)
+            cv2.putText(display, "SEARCHING FOR ARUCO TAGS...",
+                        (12, 42), cv2.FONT_HERSHEY_DUPLEX, 0.85, (80, 80, 255), 2)
+            self.status_badge.config(text="  SEARCHING  ", bg=RED, fg="white")
+
+        # FPS counter tracks inference throughput, not display rate
+        if is_new:
+            self._fps_times.append(time.perf_counter())
+        if len(self._fps_times) >= 2:
+            fps = (len(self._fps_times) - 1) / \
+                  (self._fps_times[-1] - self._fps_times[0] + 1e-9)
+            cv2.putText(display, f"DET {fps:.1f}",
+                        (display.shape[1] - 95, 28),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 200, 255), 2)
+
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        if cw > 10 and ch > 10:
+            src_h, src_w = display.shape[:2]
+            scale   = min(cw / src_w, ch / src_h)
+            new_w, new_h = int(src_w * scale), int(src_h * scale)
+            resized = cv2.resize(display, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+            x0, y0  = (cw - new_w) // 2, (ch - new_h) // 2
+
+            if self._padded is None or self._padded.shape[:2] != (ch, cw):
+                self._padded = np.zeros((ch, cw, 3), dtype=np.uint8)
             else:
-                # Fallback: predict on raw frame when board not detected
-                results = self.engine.predict(frame)
-                display = cv2.resize(frame, (810, 540))
-                draw_results(display, results, self.class_names, matrix=None)
-                cv2.putText(display, "SEARCHING FOR ARUCO TAGS...",
-                            (12, 42), cv2.FONT_HERSHEY_DUPLEX, 0.85, (80, 80, 255), 2)
-                self.status_badge.config(text="  SEARCHING  ", bg=RED, fg="white")
+                if y0 > 0:
+                    self._padded[:y0] = 0; self._padded[y0 + new_h:] = 0
+                if x0 > 0:
+                    self._padded[:, :x0] = 0; self._padded[:, x0 + new_w:] = 0
 
-            # Fit inside canvas while preserving 810×540 aspect ratio (letterbox)
-            cw = self.canvas.winfo_width()
-            ch = self.canvas.winfo_height()
-            if cw > 10 and ch > 10:
-                src_h, src_w = display.shape[:2]
-                scale  = min(cw / src_w, ch / src_h)
-                new_w  = int(src_w * scale)
-                new_h  = int(src_h * scale)
-                resized = cv2.resize(display, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-                padded  = np.zeros((ch, cw, 3), dtype=np.uint8)
-                x0 = (cw - new_w) // 2
-                y0 = (ch - new_h) // 2
-                padded[y0:y0 + new_h, x0:x0 + new_w] = resized
-                display = padded
+            self._padded[y0:y0 + new_h, x0:x0 + new_w] = resized
+            self._lb = (scale, x0, y0)
+            display  = self._padded
 
-            t  = self.transformer
-            gm = self.grid_mapper
-            self.readout.config(
-                text=(f"Margin  {t.margin}\n"
-                      f"Shift X {t.shift_x:+d}\n"
-                      f"Shift Y {t.shift_y:+d}\n"
-                      f"Off X   {gm.offset_x}\n"
-                      f"Off Y   {gm.offset_y}\n"
-                      f"Pitch X {gm.pitch_x:.1f}\n"
-                      f"Pitch Y {gm.pitch_y:.1f}"))
+        t, gm = self.transformer, self.grid_mapper
+        self.readout.config(text=(
+            f"Margin  {t.margin}\n"
+            f"Shift X {t.shift_x:+d}\n  Shift Y {t.shift_y:+d}\n"
+            f"Off X   {gm.offset_x}\n  Off Y   {gm.offset_y}\n"
+            f"Pitch X {gm.pitch_x:.1f}\n  Pitch Y {gm.pitch_y:.1f}"))
 
-            rgb = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
-            self.photo = ImageTk.PhotoImage(image=Image.fromarray(rgb))
-            self.canvas.create_image(0, 0, image=self.photo, anchor="nw")
+        rgb = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
+        self.photo = ImageTk.PhotoImage(image=Image.fromarray(rgb))
+        self.canvas.create_image(0, 0, image=self.photo, anchor="nw")
 
-        self.window.after(15, self._update_frame)
+        self.window.after(33, self._update_frame)
+
+    def _update_circuit_ui(self, info: dict):
+        t     = info['type']
+        ohms  = info['total_ohms']
+        extra = info.get('extra', {})
+        color = _CIRCUIT_COLORS.get(t, DIM)
+
+        self.circuit_type_lbl.config(text=t, fg=color)
+        self.circuit_formula_lbl.config(text=info.get('formula', ''))
+
+        if t == 'Wheatstone Bridge' and extra.get('balanced') is not None:
+            bal       = extra['balanced']
+            bal_color = '#4ade80' if bal else '#f87171'
+            bal_text  = '[OK] Balanced' if bal else '[!!] Unbalanced'
+            req       = extra.get('req_ac', 0)
+            if req > 0:
+                if   req >= 1e6: r_str = f"{req/1e6:.2f} MΩ"
+                elif req >= 1e3: r_str = f"{req/1e3:.2f} kΩ"
+                else:             r_str = f"{req:.1f} Ω"
+                bal_text += f"  Req={r_str}"
+            self.circuit_ohms_lbl.config(text=bal_text, fg=bal_color)
+        elif ohms > 0:
+            if   ohms >= 1e6: s = f"= {ohms/1e6:.2f} MΩ"
+            elif ohms >= 1e3: s = f"= {ohms/1e3:.2f} kΩ"
+            else:              s = f"= {ohms:.1f} Ω"
+            self.circuit_ohms_lbl.config(text=s, fg=color)
+        else:
+            self.circuit_ohms_lbl.config(text='', fg=color)
 
     def on_closing(self):
-        self._save_config()
+        self._stop_event.set()
+        configs.save_ui_state({k: v.get() for k, v in {
+            "margin":  self.var_margin,  "shift_x": self.var_shift_x,
+            "shift_y": self.var_shift_y, "off_x":   self.var_off_x,
+            "off_y":   self.var_off_y,   "pitch_x": self.var_pitch_x,
+            "pitch_y": self.var_pitch_y,
+        }.items()})
         self.camera.stop()
         self.window.destroy()
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     root = tk.Tk()
-    app = OhmVisionApp(root)
+    OhmVisionApp(root)
     root.mainloop()

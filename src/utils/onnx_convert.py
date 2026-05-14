@@ -4,7 +4,7 @@ from ultralytics import YOLO
 current_path= Path(__file__).resolve()
 project_root = current_path.parents[2]
 
-weights_path = project_root / "models" / "Yolo_v8n_pose_weights.pt"
+weights_path = project_root / "models" / "Yolo_v8s_pose_weights.pt"
 
 print(f" Attempting to load model from: {weights_path}")
 

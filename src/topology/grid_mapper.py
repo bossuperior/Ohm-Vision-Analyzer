@@ -6,6 +6,7 @@ class GridMapper:
     def __init__(self, target_w: int = 810, target_h: int = 540, offset_x: int = 45, offset_y: int = 40):
         self.target_w = target_w
         self.target_h = target_h
+        self._node_cache: Dict = {}  # (comp_id, leg_idx) → (hole_id, elec_node, snap_px)
         
         # Offset from board edges to the first hole
         self.offset_x = offset_x
@@ -41,6 +42,7 @@ class GridMapper:
                    pitch_x: float = None, pitch_y: float = None, cols: int = None):
         self.offset_x = offset_x
         self.offset_y = offset_y
+        self._node_cache.clear()  # pitch/offset change invalidates cached snaps
         if cols is not None and cols > 1:
             self.cols = cols
         if pitch_x is not None and pitch_x > 0:
@@ -93,24 +95,48 @@ class GridMapper:
             
         return hole_id, electrical_node, (snapped_x, snapped_y)
 
-    def map_to_holes(self, component_data: List[Dict]) -> List[Dict]:
-        mapped_components = []
+    def snap_to_nearest_hole(self, x: float, y: float) -> Tuple[int, int]:
+        """Return pixel (x, y) of the nearest breadboard hole for a given point."""
+        _, _, snapped_px = self.map_pixel_to_node(x, y)
+        return snapped_px
 
+    def map_to_holes(self, component_data: List[Dict]) -> List[Dict]:
+        # Drop cache entries for components no longer visible
+        active = {comp['id'] for comp in component_data}
+        self._node_cache = {k: v for k, v in self._node_cache.items() if k[0] in active}
+
+        mapped_components = []
         for comp in component_data:
             kpts = comp.get('keypoints', [])
             if len(kpts) < 2:
                 continue
-            leg1_x, leg1_y = kpts[0][:2]
-            leg2_x, leg2_y = kpts[1][:2]
-            hole1, elec1, snap1 = self.map_pixel_to_node(leg1_x, leg1_y)
-            hole2, elec2, snap2 = self.map_pixel_to_node(leg2_x, leg2_y)
+
+            nodes = []
+            for leg_idx, (lx, ly) in enumerate((kpts[0][:2], kpts[1][:2])):
+                hole, elec, snap = self.map_pixel_to_node(lx, ly)
+
+                # Hysteresis: only accept a different hole if keypoint crossed 60% of pitch
+                # from the cached snap. This prevents jitter at hole boundaries from
+                # causing topology flip-flop.
+                key = (comp['id'], leg_idx)
+                if key in self._node_cache:
+                    c_hole, c_elec, c_snap = self._node_cache[key]
+                    if hole != c_hole:
+                        dx = abs(lx - c_snap[0]) / self.pitch_x
+                        dy = abs(ly - c_snap[1]) / self.pitch_y
+                        if dx < 0.6 and dy < 0.6:
+                            hole, elec, snap = c_hole, c_elec, c_snap
+
+                self._node_cache[key] = (hole, elec, snap)
+                nodes.append((hole, elec, snap))
+
             mapped_components.append({
                 'id': comp['id'],
-                'node1': elec1,
-                'node2': elec2,
-                'hole1_name': hole1,
-                'hole2_name': hole2,
-                'snapped_points': [snap1, snap2]
+                'node1': nodes[0][1],
+                'node2': nodes[1][1],
+                'hole1_name': nodes[0][0],
+                'hole2_name': nodes[1][0],
+                'snapped_points': [nodes[0][2], nodes[1][2]]
             })
 
         return mapped_components
