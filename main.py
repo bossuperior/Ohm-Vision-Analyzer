@@ -67,7 +67,7 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
         self._fps_times = collections.deque(maxlen=30)
         self._padded    = None
 
-        self.camera      = CameraLoader(camera_id=1, width=1280, height=720)
+        self.camera      = CameraLoader(camera_id=0, width=1280, height=720)
         self.engine      = ModelEngine("models/Yolo_v8s_pose_weights.onnx")
         self.transformer = BreadboardWarper(output_width=810, output_height=540)
         self.grid_mapper = GridMapper(target_w=810, target_h=540)

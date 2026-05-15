@@ -6,25 +6,22 @@ import cv2
 import tkinter as tk
 from PIL import Image, ImageTk
 from src.vision.breadboard_warper import BreadboardWarper
+from src.vision.camera_loader import CameraLoader
 
 
 class DataCollectorApp:
-    def __init__(self, window, window_title, video_source=1):
+    def __init__(self, window, window_title, camera_id=0):
         self.window = window
         self.window.title(window_title)
         self.window.geometry("900x820")
-        self.video_source = video_source
 
         current_file_dir = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.dirname(os.path.dirname(current_file_dir))
         self.save_dir = os.path.join(project_root, "data", "raw", "dataset_capture")
         os.makedirs(self.save_dir, exist_ok=True)
 
-        self.vid = cv2.VideoCapture(self.video_source, cv2.CAP_DSHOW)
-        self.vid.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self.vid.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        if not self.vid.isOpened():
-            print("Camera not opened!")
+        self.camera = CameraLoader(camera_id=camera_id, width=1280, height=720)
+        self.camera.start()
 
         self.warper = BreadboardWarper(output_width=810, output_height=540)
         self.current_warped = None
@@ -91,8 +88,8 @@ class DataCollectorApp:
         self.warper.shift_y = self.var_shift_y.get() - 100
 
     def update_frame(self):
-        ret, frame = self.vid.read()
-        if ret:
+        frame = self.camera.get_frame()
+        if frame is not None:
             success, warped, _ = self.warper.process(frame)
 
             if success:
@@ -138,12 +135,11 @@ class DataCollectorApp:
         print(f"Captured: {filename}")
 
     def on_closing(self):
-        if self.vid.isOpened():
-            self.vid.release()
+        self.camera.stop()
         self.window.destroy()
 
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = DataCollectorApp(root, "Ohm Vision Data Collector", video_source=1)
+    app = DataCollectorApp(root, "Ohm Vision Data Collector", camera_id=0)
     root.mainloop()

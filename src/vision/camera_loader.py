@@ -18,13 +18,22 @@ class CameraLoader:
         self.lock = threading.Lock()
 
     def start(self):
-        self.cap = cv2.VideoCapture(self.camera_id, cv2.CAP_DSHOW)
+        if cv2.CAP_V4L2:
+            self.cap = cv2.VideoCapture(self.camera_id, cv2.CAP_V4L2)
+        else:
+            self.cap = cv2.VideoCapture(self.camera_id)
 
         if not self.cap.isOpened():
             raise RuntimeError(f"Failed to open webcam ID: {self.camera_id}")
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+
+        self.cap.set(cv2.CAP_PROP_AUTO_WB, 0)          # ปิด auto WB ของ driver
+        self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)     # 1 = manual mode (V4L2)
+        self.cap.set(cv2.CAP_PROP_BRIGHTNESS, 128)      # neutral
+        self.cap.set(cv2.CAP_PROP_SATURATION, 128)      # neutral
+
 
         # Read the first frame to initialize
         self.ret, self.frame = self.cap.read()
