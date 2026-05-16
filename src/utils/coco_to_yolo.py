@@ -7,7 +7,9 @@ class CocoToYoloPoseConverter:
         # Mapping COCO class names → YOLO class IDs
         self.target_classes = {
             'resistor':    0,
-            'wire':        1,
+            'resistor_4b': 1,
+            'resistor_5b': 2,
+            'wire':        3,
         }
 
     def convert(self, json_path, output_dir):
@@ -80,7 +82,7 @@ class CocoToYoloPoseConverter:
                 line = f"{yolo_class_id} {x_center:.6f} {y_center:.6f} {norm_bw:.6f} {norm_bh:.6f}"
 
                 points_processed = 0
-                kpts = ann.get('keypoints', [])
+                kpts = ann.get('keypoints', [])[:self.max_keypoints * 3]  # truncate to max
 
                 for i in range(0, len(kpts), 3):
                     kx = float(kpts[i])
@@ -133,7 +135,7 @@ if __name__ == "__main__":
     }
 
     print("Starting COCO → YOLO Pose Conversion...")
-    converter = CocoToYoloPoseConverter(max_keypoints=4)
+    converter = CocoToYoloPoseConverter(max_keypoints=5)
 
     for split_name, paths in datasets.items():
         print(f"\n[{split_name.upper()}]")

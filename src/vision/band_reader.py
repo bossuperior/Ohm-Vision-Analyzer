@@ -19,14 +19,17 @@ class BandReader:
     def __init__(self):
         self.detector = BandDetector()
 
-    # ── 0a. Affine-crop จาก body class (Resistor_4B/5B): ใช้ kp[0] และ kp[1] ──
+    # ── 0a. Affine-crop จาก body class (Resistor_4B/5B) ─────────────────────────
+    # ใช้ first → last visible keypoint (band positions) เป็น axis
+    # ครอบตัวถังทั้งหมดตั้งแต่แถบแรกถึงแถบสุดท้าย
     def crop_from_body_keypoints(self, warped: np.ndarray,
                                  kp_data: np.ndarray) -> np.ndarray:
         if kp_data is None or len(kp_data) < 2:
             return None
-        if kp_data[0][2] < 0.5 or kp_data[1][2] < 0.5:
+        visible = [kp for kp in kp_data if kp[2] >= 0.5]
+        if len(visible) < 2:
             return None
-        return self._affine_crop(warped, kp_data[0][:2], kp_data[1][:2])
+        return self._affine_crop(warped, visible[0][:2], visible[-1][:2])
 
     # ── 0b. Affine-crop: ดึง rotated rectangle ตาม Body_2→Body_3 ──────────────
     def crop_from_keypoints(self, warped: np.ndarray,
