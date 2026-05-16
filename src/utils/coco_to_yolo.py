@@ -115,11 +115,11 @@ class CocoToYoloPoseConverter:
 
 if __name__ == "__main__":
     IN_DIR  = r"./data"
-    OUT_DIR = r"./data/processed/yolo_pose"
+    OUT_DIR = r"./data/processed/yolo-pose"
 
     datasets = {
         "train": {
-            "json": os.path.join(IN_DIR, "augmented", "coco_keypoint", "train_augmented", "_annotations.coco.json"),
+            "json": os.path.join(OUT_DIR, "images", "train", "_annotations.coco.json"),
             "out":  os.path.join(OUT_DIR, "labels", "train"),
         },
         "val": {

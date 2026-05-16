@@ -17,7 +17,10 @@ from src.vision.band_reader import BandReader
 from src.ui.renderer import draw_results
 from src.ui.build_ui import UIBuilderMixin
 from src.ui.callback import CallbackMixin
-from config.configs import BG, GREEN, RED, DIM
+from config.configs import (BG, GREEN, RED, DIM,
+                            CLS_RESISTOR_LEAD, CLS_WIRE,
+                            CLS_RESISTOR_4B, CLS_RESISTOR_5B,
+                            CLS_RESISTOR_BODIES)
 import config.configs as configs
 
 
@@ -112,41 +115,75 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
             self.window.attributes("-fullscreen", False)
 
     def _start_band_worker(self, warped_snap, kp_snap, cls_snap):
-        VOTE_SIZE   = 7   # เก็บ 7 ครั้งล่าสุด
-        VOTE_THRESH = 4   # ต้องตรงกันอย่างน้อย 4 ครั้งจึงแสดง
+        VOTE_SIZE   = 7
+        VOTE_THRESH = 4
         BAD = {"?", "ERR", "Unknown", "Read Error", "Calc Error", "Error"}
 
+        def _kp_center(kp_arr):
+            pts = [k[:2] for k in kp_arr if len(k) >= 3 and k[2] > 0.3]
+            if not pts:
+                return None
+            return (sum(p[0] for p in pts) / len(pts),
+                    sum(p[1] for p in pts) / len(pts))
+
         def worker():
+            # สร้าง map: lead_idx → center point (สำหรับ association)
+            lead_centers = {}
+            for i, cid in enumerate(cls_snap):
+                if int(cid) == CLS_RESISTOR_LEAD and i < len(kp_snap):
+                    c = _kp_center(kp_snap[i])
+                    if c:
+                        lead_centers[i] = c
+
             for idx, cls_id in enumerate(cls_snap):
-                if int(cls_id) != 0 or idx >= len(kp_snap):
+                cid = int(cls_id)
+                if cid not in CLS_RESISTOR_BODIES or idx >= len(kp_snap):
                     continue
+
+                hint = 4 if cid == CLS_RESISTOR_4B else 5
+
+                # จับคู่ body detection → lead detection ที่ใกล้ที่สุด
+                if lead_centers:
+                    bc = _kp_center(kp_snap[idx])
+                    if bc:
+                        lead_idx = min(
+                            lead_centers,
+                            key=lambda i: (lead_centers[i][0] - bc[0]) ** 2
+                                        + (lead_centers[i][1] - bc[1]) ** 2)
+                    else:
+                        lead_idx = idx
+                else:
+                    lead_idx = idx  # fallback ถ้าไม่มี lead class ในเฟรม
+
                 try:
-                    crop = self.band_reader.crop_from_keypoints(warped_snap, kp_snap[idx])
+                    crop = self.band_reader.crop_from_body_keypoints(warped_snap, kp_snap[idx])
                     if crop is not None:
-                        cv2.imwrite(f"debug_crop_{idx}.jpg", crop)
-                        res, bands, _ = self.band_reader.calculate(crop)
+                        cv2.imwrite(f"debug_crop_{lead_idx}.jpg", crop)
+                        res, bands, _ = self.band_reader.calculate(crop, band_count_hint=hint)
                         debug_img = self.band_reader.annotate_crop(crop, bands, res)
-                        cv2.imwrite(f"debug_bands_{idx}.jpg", debug_img)
-                        hsv_str = [(b['color'], int(b['mean_hsv'][0]), int(b['mean_hsv'][1]), int(b['mean_hsv'][2])) for b in bands]
-                        print(f"[Band{idx}] {hsv_str} → {res}")
+                        cv2.imwrite(f"debug_bands_{lead_idx}.jpg", debug_img)
+                        hsv_str = [(b['color'], int(b['mean_hsv'][0]),
+                                    int(b['mean_hsv'][1]), int(b['mean_hsv'][2]))
+                                   for b in bands]
+                        print(f"[Band{lead_idx}] hint={hint} {hsv_str} → {res}")
                     else:
                         res = "?"
-                        print(f"[Band{idx}] crop=None")
+                        print(f"[Band{lead_idx}] crop=None")
                 except Exception as e:
                     res = "?"
-                    print(f"[Band] idx={idx} error: {e}")
+                    print(f"[Band] idx={lead_idx} error: {e}")
 
-                buf = self._ohm_votes.setdefault(idx, collections.deque(maxlen=VOTE_SIZE))
+                buf = self._ohm_votes.setdefault(lead_idx, collections.deque(maxlen=VOTE_SIZE))
                 buf.append(res)
-                print(f"[Vote{idx}] buf={list(buf)}")
+                print(f"[Vote{lead_idx}] buf={list(buf)}")
 
                 winner, freq = Counter(buf).most_common(1)[0]
                 if freq >= VOTE_THRESH and winner not in BAD:
-                    self._ohm_cache[idx]   = winner
-                    self._ohm_numeric[idx] = _parse_ohms(winner)
+                    self._ohm_cache[lead_idx]   = winner
+                    self._ohm_numeric[lead_idx] = _parse_ohms(winner)
                 elif all(r in BAD for r in buf):
-                    self._ohm_cache[idx] = "?"
-                    self._ohm_numeric.pop(idx, None)
+                    self._ohm_cache[lead_idx] = "?"
+                    self._ohm_numeric.pop(lead_idx, None)
 
         self._band_thread = threading.Thread(target=worker, daemon=True)
         self._band_thread.start()
@@ -193,8 +230,9 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
 
         success, base, results = pkg
 
-        # Trigger band reading on every new inference result (rate-limited by thread alive check)
-        if is_new and success and (self._band_thread is None or not self._band_thread.is_alive()):
+        # Trigger band reading เมื่อมี body class detection (4B หรือ 5B)
+        has_body = any(int(c) in CLS_RESISTOR_BODIES for c in results.class_ids)
+        if is_new and success and has_body and (self._band_thread is None or not self._band_thread.is_alive()):
             kp_len = len(results.keypoints)
             self._start_band_worker(
                 base.copy(),
@@ -212,8 +250,8 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
             self.status_badge.config(text="  BOARD OK  ", bg=GREEN, fg="#052e16")
 
             # Circuit topology — wires merge electrical nodes via Union-Find
-            resistor_ids = {idx for idx, cid in enumerate(results.class_ids) if int(cid) == 0}
-            wire_ids     = {idx for idx, cid in enumerate(results.class_ids) if int(cid) == 1}
+            resistor_ids = {idx for idx, cid in enumerate(results.class_ids) if int(cid) == CLS_RESISTOR_LEAD}
+            wire_ids     = {idx for idx, cid in enumerate(results.class_ids) if int(cid) == CLS_WIRE}
             all_kp_data  = [
                 {'id': idx, 'keypoints': kps}
                 for idx, (_, kps) in enumerate(

@@ -189,8 +189,8 @@ class DatasetsAugmentor:
 if __name__ == "__main__":
     JSON_PATH     = r"./data/labels/coco_keypoint/train/_annotations.coco.json"
     IMG_DIR       = r"./data/labels/coco_keypoint/train"
-    OUT_IMG_DIR   = r"./data/augmented/coco_keypoint/train_augmented"
-    OUT_JSON_PATH = r"./data/augmented/coco_keypoint/train_augmented/_annotations.coco.json"
+    OUT_IMG_DIR   = r"./data/processed/yolo-pose/images/train"
+    OUT_JSON_PATH = r"./data/processed/yolo-pose/images/train/_annotations.coco.json"
 
     augmentor = DatasetsAugmentor(JSON_PATH, IMG_DIR, OUT_IMG_DIR, OUT_JSON_PATH)
     augmentor.run_augmentation(augment_times=4)

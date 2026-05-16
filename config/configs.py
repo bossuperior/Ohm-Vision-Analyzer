@@ -19,6 +19,13 @@ DEFAULTS = {
     "pitch_y": 274,
 }
 
+# Class IDs — must match model training order
+CLS_RESISTOR_LEAD   = 0   # "resistor"     — ขา (leads) → circuit topology
+CLS_RESISTOR_4B     = 1   # "Resistor_4B"  — body 4-band → color reading
+CLS_RESISTOR_5B     = 2   # "Resistor_5B"  — body 5-band → color reading
+CLS_WIRE            = 3   # "wire"         → node merging
+CLS_RESISTOR_BODIES = {CLS_RESISTOR_4B, CLS_RESISTOR_5B}
+
 #Theme colors (can be overridden by config)
 BG       = "#1a1a2e"
 PANEL_BG = "#16213e"

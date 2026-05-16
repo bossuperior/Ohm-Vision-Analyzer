@@ -19,16 +19,29 @@ class BandReader:
     def __init__(self):
         self.detector = BandDetector()
 
-    # ── 0. Affine-crop: ดึง rotated rectangle ตาม Body_2→Body_3 ──────────────
+    # ── 0a. Affine-crop จาก body class (Resistor_4B/5B): ใช้ kp[0] และ kp[1] ──
+    def crop_from_body_keypoints(self, warped: np.ndarray,
+                                 kp_data: np.ndarray) -> np.ndarray:
+        if kp_data is None or len(kp_data) < 2:
+            return None
+        if kp_data[0][2] < 0.5 or kp_data[1][2] < 0.5:
+            return None
+        return self._affine_crop(warped, kp_data[0][:2], kp_data[1][:2])
+
+    # ── 0b. Affine-crop: ดึง rotated rectangle ตาม Body_2→Body_3 ──────────────
     def crop_from_keypoints(self, warped: np.ndarray,
                             kp_data: np.ndarray) -> np.ndarray:
         if kp_data is None or len(kp_data) < 4:
             return None
         if kp_data[2][2] < 0.5 or kp_data[3][2] < 0.5:
             return None
+        return self._affine_crop(warped, kp_data[2][:2], kp_data[3][:2])
 
-        p2 = kp_data[2][:2].astype(float)
-        p3 = kp_data[3][:2].astype(float)
+    # ── 0c. Shared affine crop implementation ────────────────────────────────
+    def _affine_crop(self, warped: np.ndarray,
+                     p2: np.ndarray, p3: np.ndarray) -> np.ndarray:
+        p2 = p2.astype(float)
+        p3 = p3.astype(float)
         dx, dy = p3[0] - p2[0], p3[1] - p2[1]
         length = float(np.hypot(dx, dy))
         if length < 10:
@@ -38,11 +51,9 @@ class BandReader:
         cos_a, sin_a = dx / length, dy / length
         perp_pad = int(np.clip(length * 0.20, 12, 30))
 
-        out_w = int(length) + 60   # 30px margin ทั้งสองด้าน → เห็น body สีเบจชัดที่ขอบ
-        out_h = perp_pad * 2       # ความหนาตั้งฉาก
+        out_w = int(length) + 60
+        out_h = perp_pad * 2
 
-        # Affine inverse-map: dst pixel (u,v) → warped pixel (x,y)
-        # top-left (0,0) = center − half_body*body_unit − half_h*perp_unit
         tx = cx - (out_w / 2) * cos_a + (out_h / 2) * sin_a
         ty = cy - (out_w / 2) * sin_a - (out_h / 2) * cos_a
         M  = np.float32([[cos_a, -sin_a, tx],
@@ -124,22 +135,53 @@ class BandReader:
         return np.clip(img.astype(np.float32) * scale, 0, 255).astype(np.uint8)
 
     # ── 3. Public entry ───────────────────────────────────────────────────────
-    def calculate(self, cropped: np.ndarray) -> Tuple[str, List[Dict], float]:
+    def calculate(self, cropped: np.ndarray,
+                  band_count_hint: int = None) -> Tuple[str, List[Dict], float]:
         if cropped is None or cropped.size == 0:
             return "Unknown", [], 0.0
-        sharp    = self._sharpen(cropped)           # คมขึ้นก่อนทุก step
+        sharp    = self._sharpen(cropped)
         body_roi, body_x0 = self._isolate_body(sharp)
-        roi = self._awb(body_roi)       # normalize สีก่อนทุกอย่าง
+        roi = self._awb(body_roi)
         roi = self._shrink_roi(roi)
         bands = self._scan_bands(roi)
         if not bands:
             return "Unknown", [], 0.0
         bands = self.detector.fix_false_colors(bands)
-        # แปลงพิกัด x จาก roi → crop ดั้งเดิม (เพื่อใช้ใน annotate_crop)
+        bands = self._apply_count_hint(bands, band_count_hint)
         x_off = body_x0 + int(body_roi.shape[1] * 0.10)
         for b in bands:
             b['x_crop'] = b['x'] + x_off
         return self._calculate_ohms(bands)
+
+    # ── 3a. Hardcoded band-count rule ─────────────────────────────────────────
+    # กฎฟิสิกส์:
+    #   GOLD / SILVER (tolerance) → 4-band carbon film → ตัวถังสีครีม/เบจ
+    #   BROWN / RED / GREEN / BLUE / VIOLET (tolerance) → 5-band metal film → ตัวถังสีฟ้า
+    _HINT_4 = {'GOLD', 'SILVER'}
+    _HINT_5 = {'BROWN', 'RED', 'GREEN', 'BLUE', 'VIOLET'}
+
+    def _apply_count_hint(self, bands: List[Dict],
+                          hint: int) -> List[Dict]:
+        if not bands:
+            return bands
+
+        last_color = bands[-1]['color']
+        if last_color in self._HINT_4:
+            expected = 4
+        elif last_color in self._HINT_5:
+            expected = 5
+        else:
+            expected = hint  # fallback: ใช้ class จาก model
+
+        if expected is None or len(bands) == expected:
+            return bands
+
+        if len(bands) > expected:
+            # ตัดแถบส่วนเกิน: เก็บอันที่กว้างสุด (contrast สูงสุด) แล้ว re-sort ตามตำแหน่ง
+            trimmed = sorted(bands, key=lambda b: -b.get('w', 1))[:expected]
+            return sorted(trimmed, key=lambda b: b['x'])
+
+        return bands  # น้อยกว่า expected: คืนเหมือนเดิม (ไม่สร้าง band ปลอม)
 
     # ── 3b. Debug annotation ──────────────────────────────────────────────────
     def annotate_crop(self, crop: np.ndarray, bands: List[Dict],
