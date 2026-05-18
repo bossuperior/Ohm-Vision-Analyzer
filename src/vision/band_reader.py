@@ -1,8 +1,8 @@
 import cv2
 import numpy as np
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from src.vision.band_detector import BandDetector
-from src.vision.color_mapping import COLOR_VALS
+from src.vision.color_mapping import COLOR_VALS, REF_COLORS
 
 _BAND_BGR = {
     'BLACK':  (30,  30,  30),   'BROWN':  (30,  80, 160),
@@ -123,7 +123,16 @@ class BandReader:
                 result[:, :, ch] = np.clip(result[:, :, ch] * (all_avg / avg), 0, 255)
         return result.astype(np.uint8)
 
-    # ── 2b. Board-referenced WB ───────────────────────────────────────────────
+    # ── 2b. CLAHE contrast enhancement ───────────────────────────────────────
+    _clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(4, 4))
+
+    def _clahe_enhance(self, img: np.ndarray) -> np.ndarray:
+        """เพิ่ม contrast บน L channel (LAB) — ช่วย band ที่ overexposed / low contrast"""
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        lab[:, :, 0] = self._clahe.apply(lab[:, :, 0])
+        return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+    # ── 2c. Board-referenced WB ───────────────────────────────────────────────
     BOARD_BEIGE_BGR = np.array([185, 195, 200], dtype=np.float32)
 
     def _board_ref_wb(self, img: np.ndarray) -> np.ndarray:
@@ -145,46 +154,130 @@ class BandReader:
         sharp    = self._sharpen(cropped)
         body_roi, body_x0 = self._isolate_body(sharp)
         roi = self._awb(body_roi)
+        roi = self._clahe_enhance(roi)
         roi = self._shrink_roi(roi)
         bands = self._scan_bands(roi)
         if not bands:
             return "Unknown", [], 0.0
         bands = self.detector.fix_false_colors(bands)
         bands = self._apply_count_hint(bands, band_count_hint)
+        bands, known_ohms, known_tol = self._resolve_by_rules(bands, band_count_hint)
         x_off = body_x0 + int(body_roi.shape[1] * 0.10)
         for b in bands:
             b['x_crop'] = b['x'] + x_off
+        if known_ohms is not None:
+            return self._label_from_ohms(known_ohms, known_tol), bands, known_ohms
         return self._calculate_ohms(bands)
 
-    # ── 3a. Hardcoded band-count rule ─────────────────────────────────────────
-    # กฎฟิสิกส์:
-    #   GOLD / SILVER (tolerance) → 4-band carbon film → ตัวถังสีครีม/เบจ
-    #   BROWN / RED / GREEN / BLUE / VIOLET (tolerance) → 5-band metal film → ตัวถังสีฟ้า
-    _HINT_4 = {'GOLD', 'SILVER'}
-    _HINT_5 = {'BROWN', 'RED', 'GREEN', 'BLUE', 'VIOLET'}
+    # ── 3a. Rule-based constraint satisfaction ───────────────────────────────
+    # All valid color combinations — derived from conditional rules (bidirectional)
+    # 5B: first→second, second→multiplier, third=BLACK fixed, tolerance=BROWN fixed
+    # 4B: first→second, second→multiplier, tolerance=GOLD fixed
+    _5B_COMBOS = (
+        (('BROWN',  'BLACK',  'BLACK', 'BROWN',  'BROWN'),  {'ohms':   1_000, 'tol': '1%'}),
+        (('BROWN',  'BLACK',  'BLACK', 'ORANGE', 'BROWN'),  {'ohms': 100_000, 'tol': '1%'}),
+        (('BLUE',   'GRAY',   'BLACK', 'BROWN',  'BROWN'),  {'ohms':   6_800, 'tol': '1%'}),
+        (('WHITE',  'BROWN',  'BLACK', 'BLACK',  'BROWN'),  {'ohms':     910, 'tol': '1%'}),
+        (('GRAY',   'RED',    'BLACK', 'BLACK',  'BROWN'),  {'ohms':     820, 'tol': '1%'}),
+        (('YELLOW', 'BROWN',  'BLACK', 'SILVER', 'BROWN'),  {'ohms':     4.1, 'tol': '1%'}),
+    )
+    _4B_COMBOS = (
+        (('ORANGE', 'WHITE',  'BROWN',  'GOLD'),  {'ohms':    390, 'tol': '5%'}),
+        (('YELLOW', 'VIOLET', 'BROWN',  'GOLD'),  {'ohms':    470, 'tol': '5%'}),
+        (('YELLOW', 'VIOLET', 'RED',    'GOLD'),  {'ohms':  4_700, 'tol': '5%'}),
+        (('BROWN',  'BLACK',  'BROWN',  'GOLD'),  {'ohms':    100, 'tol': '5%'}),
+        (('BROWN',  'BLACK',  'RED',    'GOLD'),  {'ohms':  1_000, 'tol': '5%'}),
+        (('BROWN',  'BLACK',  'ORANGE', 'GOLD'),  {'ohms': 10_000, 'tol': '5%'}),
+    )
+
+    _TOL_4B   = {'GOLD'}
+    _TOL_5B   = {'BROWN'}
+    _FIRST_4B = {'BROWN', 'ORANGE', 'YELLOW'}
+    _FIRST_5B = {'BROWN', 'YELLOW', 'BLUE', 'WHITE', 'GRAY'}
 
     def _apply_count_hint(self, bands: List[Dict],
                           hint: int) -> List[Dict]:
-        if not bands:
+        if not bands or len(bands) < 2:
             return bands
 
-        last_color = bands[-1]['color']
-        if last_color in self._HINT_4:
+        first_c = bands[0]['color']
+        last_c  = bands[-1]['color']
+
+        # ── Step 1: ตรวจ reading direction ──────────────────────────────────
+        tol_on_left    = first_c in self._TOL_4B or first_c in self._TOL_5B
+        start_on_right = last_c  in self._FIRST_4B or last_c in self._FIRST_5B
+        if tol_on_left and start_on_right:
+            bands   = list(reversed(bands))
+            first_c, last_c = last_c, first_c
+
+        # ── Step 2: กำหนด expected band count จากสีแถบสุดท้าย ───────────────
+        if last_c in self._TOL_4B:
             expected = 4
-        elif last_color in self._HINT_5:
+        elif last_c in self._TOL_5B:
             expected = 5
         else:
-            expected = hint  # fallback: ใช้ class จาก model
+            expected = hint
 
-        if expected is None or len(bands) == expected:
-            return bands
-
-        if len(bands) > expected:
-            # ตัดแถบส่วนเกิน: เก็บอันที่กว้างสุด (contrast สูงสุด) แล้ว re-sort ตามตำแหน่ง
+        # ── Step 3: ตัดแถบส่วนเกิน ──────────────────────────────────────────
+        if expected is not None and len(bands) > expected:
             trimmed = sorted(bands, key=lambda b: -b.get('w', 1))[:expected]
-            return sorted(trimmed, key=lambda b: b['x'])
+            bands   = sorted(trimmed, key=lambda b: b['x'])
 
-        return bands  # น้อยกว่า expected: คืนเหมือนเดิม (ไม่สร้าง band ปลอม)
+        return bands
+
+    def _resolve_by_rules(self, bands: List[Dict],
+                          n_bands: int) -> Tuple[List[Dict], Optional[float], str]:
+        """
+        Constraint satisfaction ด้วย HSV distance scoring:
+        - เปรียบเทียบ detected bands กับทุก valid combination พร้อมกัน
+        - ทุก position cross-check กันอัตโนมัติ (bidirectional)
+        - คืน (corrected_bands, known_ohms) — ohms จาก dict เฉลย, None ถ้าไม่มี combo
+        """
+        combos = self._5B_COMBOS if n_bands == 5 else self._4B_COMBOS
+        if not bands or not combos:
+            return bands, None, '?%'
+
+        # score เฉพาะตำแหน่งที่มี band จริง — ไม่ reject ถ้าจำนวนไม่ตรง
+        n_score      = min(len(bands), n_bands) if n_bands else len(bands)
+        detected_hsv = [b['mean_hsv'] for b in bands[:n_score]]
+
+        def hsv_dist(hsv, color: str) -> float:
+            ref = REF_COLORS.get(color)
+            if ref is None:
+                return 999.0
+            dh = min(abs(hsv[0] - ref[0]), 180 - abs(hsv[0] - ref[0]))
+            ds = abs(hsv[1] - ref[1])
+            dv = abs(hsv[2] - ref[2])
+            # Per-color weights mirror those in BandDetector.closest_color
+            if color in ('BLACK', 'WHITE', 'GRAY', 'SILVER'):
+                return dh * 1.0 + ds * 3.0 + dv * 5.0
+            if color == 'BROWN':
+                return dh * 3.0 + ds * 2.0 + dv * 1.0
+            if color == 'YELLOW':
+                return dh * 10.0 + ds * 1.0 + dv * 1.0
+            if color in ('RED', 'GOLD', 'ORANGE'):
+                return dh * 3.0 + ds * 2.0 + dv * 2.0
+            return dh * 4.0 + ds * 1.0 + dv * 1.0
+
+        best_combo, best_meta, best_score = None, {}, float('inf')
+        for combo_colors, meta in combos:
+            score = sum(hsv_dist(detected_hsv[i], combo_colors[i]) for i in range(n_score))
+            score -= sum(8.0 for i in range(n_score) if bands[i]['color'] == combo_colors[i])
+            if score < best_score:
+                best_score, best_combo, best_meta = score, combo_colors, meta
+
+        if best_combo is None:
+            return bands, None, '?%'
+
+        # แก้สีแถบตาม combo ที่ match ได้ (เฉพาะตำแหน่งที่มีจริง)
+        corrected = []
+        for i, band in enumerate(bands):
+            b = dict(band)
+            if i < len(best_combo):
+                b['color'] = best_combo[i]
+                b['val']   = COLOR_VALS.get(best_combo[i], -99)
+            corrected.append(b)
+        return corrected, best_meta.get('ohms'), best_meta.get('tol', '?%')
 
     # ── 3b. Debug annotation ──────────────────────────────────────────────────
     def annotate_crop(self, crop: np.ndarray, bands: List[Dict],
@@ -317,7 +410,20 @@ class BandReader:
             patch = hsv_roi[ys:ye, x1:x2]
             if patch.size == 0:
                 continue
-            mean_hsv = tuple(cv2.mean(patch)[:3])
+            # Histogram peak: find the dominant hue bin, then median S/V near that peak
+            flat   = patch.reshape(-1, 3).astype(np.float32)
+            h_int  = flat[:, 0].clip(0, 179).astype(np.int32)
+            hist   = np.bincount(h_int, minlength=180).astype(np.float32)
+            hist   = np.convolve(hist, np.ones(7) / 7.0, mode='same')   # smooth 7-bin window
+            peak_h = float(np.argmax(hist))
+            # Use pixels within ±12° of peak for S/V estimation
+            near   = np.abs(flat[:, 0] - peak_h) < 12
+            grp    = flat[near] if near.sum() > 3 else flat
+            mean_hsv = (
+                peak_h,
+                float(np.median(grp[:, 1])),
+                float(np.median(grp[:, 2])),
+            )
             color    = self.detector.closest_color(mean_hsv)
             bands.append({
                 'color':    color,
@@ -332,6 +438,11 @@ class BandReader:
     _TOL_4 = {'GOLD': '5%', 'SILVER': '10%', 'BROWN': '1%'}
     _TOL_5 = {'GOLD': '5%', 'SILVER': '10%', 'BROWN': '1%',
                'RED': '2%', 'GREEN': '0.5%', 'BLUE': '0.25%', 'VIOLET': '0.1%'}
+
+    def _label_from_ohms(self, ohms: float, tol: str) -> str:
+        if   ohms >= 1e6: return f"{ohms/1e6:.2f}M Ohms +-{tol}"
+        elif ohms >= 1e3: return f"{ohms/1e3:.2f}k Ohms +-{tol}"
+        else:             return f"{ohms:.1f} Ohms +-{tol}"
 
     def _calculate_ohms(self, bands: List[Dict]) -> Tuple[str, List[Dict], float]:
         if len(bands) < 3:

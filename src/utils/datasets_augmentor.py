@@ -44,6 +44,7 @@ class DatasetsAugmentor:
 
             # 5. CLAHE — simulate high-contrast lighting on breadboard surface
             A.CLAHE(clip_limit=2.0, tile_grid_size=(4, 4), p=0.3),
+            A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, rotate_limit=3, p=0.3)
         ],
         # Crucial: Instruct Albumentations to calculate and update BBoxes and Keypoints
         bbox_params=A.BboxParams(format='coco', label_fields=['category_ids']),
@@ -193,4 +194,4 @@ if __name__ == "__main__":
     OUT_JSON_PATH = r"./data/processed/yolo-pose/images/train/_annotations.coco.json"
 
     augmentor = DatasetsAugmentor(JSON_PATH, IMG_DIR, OUT_IMG_DIR, OUT_JSON_PATH)
-    augmentor.run_augmentation(augment_times=4)
+    augmentor.run_augmentation(augment_times=5)

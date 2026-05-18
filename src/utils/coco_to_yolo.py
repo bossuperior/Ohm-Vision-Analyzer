@@ -135,7 +135,7 @@ if __name__ == "__main__":
     }
 
     print("Starting COCO → YOLO Pose Conversion...")
-    converter = CocoToYoloPoseConverter(max_keypoints=5)
+    converter = CocoToYoloPoseConverter(max_keypoints=2)
 
     for split_name, paths in datasets.items():
         print(f"\n[{split_name.upper()}]")

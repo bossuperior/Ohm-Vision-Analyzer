@@ -48,32 +48,25 @@ def draw_results(frame, results, class_names, matrix=None, ohm_map=None):
             x1, y1, x2, y2 = map(int, box)
 
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(frame, f"{name} {score:.2f}",
-                    (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-        # Resistance label — bottom-center inside the bounding box
+        # Resistance label — bottom-center, ชิด bottom ของ box
         if ohm_map is not None and i in ohm_map:
-            ohm_txt  = ohm_map[i] or "?"
-            good     = ohm_txt not in ("Unknown", "Error", "Read Error", "Calc Error", "?", "")
-            txt_col  = (0, 230, 255) if good else (120, 120, 120)
-
-            fscale = 0.55
-            thick  = 2
+            ohm_txt = ohm_map[i] or "?"
+            good    = ohm_txt not in ("Unknown", "Error", "Read Error", "Calc Error", "?", "")
+            if not good:
+                continue
+            txt_col = (0, 230, 255)
+            fscale, thick = 0.55, 2
             (tw, th), _ = cv2.getTextSize(ohm_txt, cv2.FONT_HERSHEY_SIMPLEX, fscale, thick)
 
             tx = max(x1 + 2, (x1 + x2) // 2 - tw // 2)
-            ty = max(th + 6, min(y2 - 8, frame.shape[0] - 4))
+            ty = min(y2 - 6, frame.shape[0] - 4)
 
-            # Dark backing strip for legibility
             pad = 3
-            bx1 = max(0, tx - pad)
-            by1 = max(0, ty - th - pad)
-            bx2 = min(frame.shape[1], tx + tw + pad)
-            by2 = min(frame.shape[0], ty + pad)
+            bx1 = max(0, tx - pad);          by1 = max(0, ty - th - pad)
+            bx2 = min(frame.shape[1], tx + tw + pad); by2 = min(frame.shape[0], ty + pad)
             if bx2 > bx1 and by2 > by1:
-                roi = frame[by1:by2, bx1:bx2]
-                frame[by1:by2, bx1:bx2] = (roi * 0.3).astype(np.uint8)
-
+                frame[by1:by2, bx1:bx2] = (frame[by1:by2, bx1:bx2] * 0.3).astype(np.uint8)
             cv2.putText(frame, ohm_txt, (tx, ty),
                         cv2.FONT_HERSHEY_SIMPLEX, fscale, txt_col, thick)
 

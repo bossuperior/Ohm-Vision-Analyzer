@@ -63,6 +63,7 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
         self._ohm_numeric       = {}  # idx → float (Ω)
         self._ohm_votes         = {}  # idx → deque of recent readings
         self._band_thread       = None
+        self._kp_smooth         = {}  # track_key → {'kps', 'cx', 'cy'}
 
         self._topo_votes  = collections.deque(maxlen=5)   # majority-vote circuit type
         self._stable_info = {'type': '—', 'total_ohms': 0.0, 'formula': '', 'extra': {}}
@@ -71,7 +72,7 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
         self._padded    = None
 
         self.camera      = CameraLoader(camera_id=0, width=1280, height=720)
-        self.engine      = ModelEngine("models/Yolo_v8s_pose_weights.onnx")
+        self.engine      = ModelEngine("models/Yolo_v8s_pose_weights_int8.onnx")
         self.transformer = BreadboardWarper(output_width=810, output_height=540)
         self.grid_mapper = GridMapper(target_w=810, target_h=540)
         self.class_names = self.engine.engine.names
@@ -115,8 +116,8 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
             self.window.attributes("-fullscreen", False)
 
     def _start_band_worker(self, warped_snap, kp_snap, cls_snap):
-        VOTE_SIZE   = 7
-        VOTE_THRESH = 4
+        VOTE_SIZE   = 10
+        VOTE_THRESH = 6
         BAD = {"?", "ERR", "Unknown", "Read Error", "Calc Error", "Error"}
 
         def _kp_center(kp_arr):
@@ -188,6 +189,50 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
         self._band_thread = threading.Thread(target=worker, daemon=True)
         self._band_thread.start()
 
+    def _smooth_keypoints(self, keypoints, class_ids) -> np.ndarray:
+        """EMA-smooth body-class keypoints matched by centroid proximity across frames."""
+        ALPHA    = 0.35   # current-frame weight (lower = smoother)
+        MAX_DIST = 50.0   # px — max centroid distance to match same detection
+
+        try:
+            kp_arr = np.array(keypoints, dtype=np.float32, copy=True)
+        except Exception:
+            return keypoints
+
+        if kp_arr.ndim != 3:
+            return kp_arr
+
+        new_smooth = {}
+        for idx in range(len(kp_arr)):
+            if int(class_ids[idx]) not in CLS_RESISTOR_BODIES:
+                continue
+            kps      = kp_arr[idx]          # (K, 3)
+            vis_mask = kps[:, 2] > 0.3
+            if not vis_mask.any():
+                continue
+            cx = float(kps[vis_mask, 0].mean())
+            cy = float(kps[vis_mask, 1].mean())
+
+            # Find nearest previous track by centroid
+            best_key, best_dist = None, MAX_DIST
+            for key, prev in self._kp_smooth.items():
+                d = float(np.hypot(cx - prev['cx'], cy - prev['cy']))
+                if d < best_dist:
+                    best_dist, best_key = d, key
+
+            if best_key is not None:
+                prev_kps  = self._kp_smooth[best_key]['kps']
+                both_vis  = vis_mask & (prev_kps[:, 2] > 0.3)
+                kp_arr[idx, both_vis, 0] = (ALPHA * kps[both_vis, 0]
+                                             + (1.0 - ALPHA) * prev_kps[both_vis, 0])
+                kp_arr[idx, both_vis, 1] = (ALPHA * kps[both_vis, 1]
+                                             + (1.0 - ALPHA) * prev_kps[both_vis, 1])
+
+            new_smooth[idx] = {'kps': kp_arr[idx].copy(), 'cx': cx, 'cy': cy}
+
+        self._kp_smooth = new_smooth
+        return kp_arr
+
     def _inference_loop(self):
         """Background thread: ArUco warp + YOLO inference. Never touches tkinter."""
         while not self._stop_event.is_set():
@@ -234,9 +279,11 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
         has_body = any(int(c) in CLS_RESISTOR_BODIES for c in results.class_ids)
         if is_new and success and has_body and (self._band_thread is None or not self._band_thread.is_alive()):
             kp_len = len(results.keypoints)
+            smoothed_kps = (self._smooth_keypoints(results.keypoints, results.class_ids)
+                            if kp_len > 0 else np.array([]))
             self._start_band_worker(
                 base.copy(),
-                results.keypoints.copy() if kp_len > 0 else np.array([]),
+                smoothed_kps,
                 results.class_ids.copy())
 
         display = base.copy()
@@ -244,7 +291,10 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
         if success:
             if self.show_grid:
                 display = self.grid_mapper.draw_grid_overlay(display)
-            draw_results(display, results, self.class_names, ohm_map=self._ohm_cache)
+            lead_idxs = {i for i, cid in enumerate(results.class_ids)
+                         if int(cid) == CLS_RESISTOR_LEAD}
+            ohm_map   = {k: v for k, v in self._ohm_cache.items() if k in lead_idxs}
+            draw_results(display, results, self.class_names, ohm_map=ohm_map)
             cv2.putText(display, "BOARD OK",
                         (12, 32), cv2.FONT_HERSHEY_DUPLEX, 1.0, (0, 220, 80), 2)
             self.status_badge.config(text="  BOARD OK  ", bg=GREEN, fg="#052e16")
@@ -344,15 +394,15 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
             bal_text  = '[OK] Balanced' if bal else '[!!] Unbalanced'
             req       = extra.get('req_ac', 0)
             if req > 0:
-                if   req >= 1e6: r_str = f"{req/1e6:.2f} MΩ"
-                elif req >= 1e3: r_str = f"{req/1e3:.2f} kΩ"
-                else:             r_str = f"{req:.1f} Ω"
+                if   req >= 1e6: r_str = f"{req/1e6:.2f} MOhms"
+                elif req >= 1e3: r_str = f"{req/1e3:.2f} kOhms"
+                else:             r_str = f"{req:.1f} Ohms"
                 bal_text += f"  Req={r_str}"
             self.circuit_ohms_lbl.config(text=bal_text, fg=bal_color)
         elif ohms > 0:
-            if   ohms >= 1e6: s = f"= {ohms/1e6:.2f} MΩ"
-            elif ohms >= 1e3: s = f"= {ohms/1e3:.2f} kΩ"
-            else:              s = f"= {ohms:.1f} Ω"
+            if   ohms >= 1e6: s = f"= {ohms/1e6:.2f} MOhms"
+            elif ohms >= 1e3: s = f"= {ohms/1e3:.2f} kOhms"
+            else:              s = f"= {ohms:.1f} Ohms"
             self.circuit_ohms_lbl.config(text=s, fg=color)
         else:
             self.circuit_ohms_lbl.config(text='', fg=color)
