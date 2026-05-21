@@ -7,9 +7,7 @@ class CocoToYoloPoseConverter:
         # Mapping COCO class names → YOLO class IDs
         self.target_classes = {
             'resistor':    0,
-            'resistor_4b': 1,
-            'resistor_5b': 2,
-            'wire':        3,
+            'wire':        1,
         }
 
     def convert(self, json_path, output_dir):

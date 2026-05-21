@@ -183,3 +183,5 @@ cython_debug/
 data/*
 src/*/tempCodeRunnerFile.py
 /tempCodeRunnerFile.py
+
+*.jpg

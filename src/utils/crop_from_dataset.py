@@ -23,7 +23,7 @@ from pathlib import Path
 
 
 # Class names ใน COCO ที่เป็น resistor body
-_BODY_CLASSES = {'resistor_4b', 'resistor_5b'}
+_BODY_CLASSES = {'resistor'}
 
 
 def _affine_crop(img: np.ndarray, p0: np.ndarray, p1: np.ndarray) -> np.ndarray | None:
@@ -49,6 +49,73 @@ def _affine_crop(img: np.ndarray, p0: np.ndarray, p1: np.ndarray) -> np.ndarray 
     crop = cv2.warpAffine(img, M, (out_w, out_h),
                           flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP)
     return crop if crop.size > 0 else None
+
+
+def _mask_body(crop: np.ndarray) -> np.ndarray:
+    """
+    1. ถมดำนอก body (ตัด lead ซ้าย-ขวา + breadboard บน-ล่าง)
+    2. Shadow ที่พาดผ่าน body → เติมด้วย median ของพิกเซลรอบข้าง
+    """
+    if crop is None or crop.size == 0:
+        return crop
+
+    h, w = crop.shape[:2]
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (9, 9), 3)
+
+    # ── Step 1: หา x-range ของ body (ตัด lead ซ้าย-ขวา) ────────
+    r0, r1 = int(h * 0.20), int(h * 0.80)
+    col_mean = np.mean(blur[r0:r1], axis=0).astype(float)
+    thr_c, _ = cv2.threshold(
+        np.clip(col_mean, 0, 255).astype(np.uint8).reshape(1, -1),
+        0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+    body_cols = np.where(col_mean > float(thr_c))[0]
+    if len(body_cols) > int(w * 0.15):
+        x0 = max(0, int(body_cols[0])  - 2)
+        x1 = min(w, int(body_cols[-1]) + 3)
+    else:
+        x0, x1 = 0, w
+
+    # ── Step 2: หา y-range ของ body (ตัด breadboard บน-ล่าง) ────
+    cx0, cx1 = max(0, int(w * 0.25)), min(w, int(w * 0.75))
+    row_mean = np.mean(blur[:, cx0:cx1], axis=1).astype(float)
+    thr_r, _ = cv2.threshold(
+        np.clip(row_mean, 0, 255).astype(np.uint8).reshape(1, -1),
+        0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+    body_rows = np.where(row_mean > float(thr_r))[0]
+    if len(body_rows) > int(h * 0.15):
+        y0 = max(0, int(body_rows[0])  - 2)
+        y1 = min(h, int(body_rows[-1]) + 3)
+    else:
+        y0, y1 = 0, h
+
+    # ── Step 3: ถมดำนอก body ────────────────────────────────────
+    result = np.zeros_like(crop)
+    result[y0:y1, x0:x1] = crop[y0:y1, x0:x1]
+
+    # ── Step 4: ตรวจ shadow ภายใน body → เติมด้วย median ───────
+    body = result[y0:y1, x0:x1]
+    bh, bw = body.shape[:2]
+    body_gray = cv2.cvtColor(body, cv2.COLOR_BGR2GRAY)
+
+    # kernel ต้องเป็นเลขคี่และไม่ใหญ่กว่า body
+    k_detect = min(21, bh | 1, bw | 1)
+    k_fill   = min(31, bh | 1, bw | 1)
+    if k_detect < 3 or k_fill < 3:
+        return result
+
+    # Shadow: พิกเซลที่มืดกว่า local median เกิน threshold
+    local_med = cv2.medianBlur(body_gray, k_detect)
+    shadow_mask = ((local_med.astype(int) - body_gray.astype(int)) > 40).astype(np.uint8) * 255
+
+    if shadow_mask.any():
+        filled = cv2.medianBlur(body, k_fill)
+        body[shadow_mask > 0] = filled[shadow_mask > 0]
+        result[y0:y1, x0:x1] = body
+
+    return result
 
 
 def crop_from_coco(json_path: str, img_dir: str, out_dir: str) -> None:
@@ -106,6 +173,7 @@ def crop_from_coco(json_path: str, img_dir: str, out_dir: str) -> None:
         if crop is None:
             skipped += 1
             continue
+        crop = _mask_body(crop)
 
         # ชื่อไฟล์: <image_stem>_ann<ann_id>_<class>.jpg
         stem     = Path(img_info['file_name']).stem
