@@ -5,7 +5,7 @@ from onnxruntime.quantization import quantize_dynamic, QuantType
 current_path = Path(__file__).resolve()
 project_root = current_path.parents[2]
 
-weights_path = project_root / "models" / "Yolo_v8s_pose_weights.pt"
+weights_path = project_root / "models" / "Yolo_v8n_pose_weights_2.pt"
 
 if not weights_path.exists():
     raise FileNotFoundError(f"Could not find weights at {weights_path}")

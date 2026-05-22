@@ -5,9 +5,12 @@ class CocoToYoloPoseConverter:
     def __init__(self, max_keypoints=4):
         self.max_keypoints = max_keypoints
         # Mapping COCO class names → YOLO class IDs
+        # Must match configs.py: CLS_RESISTOR_LEAD=0, CLS_RESISTOR_4B=1, CLS_RESISTOR_5B=2, CLS_WIRE=3
         self.target_classes = {
             'resistor':    0,
-            'wire':        1,
+            'resistor_4b': 1,
+            'resistor_5b': 2,
+            'wire':        3,
         }
 
     def convert(self, json_path, output_dir):

@@ -1,4 +1,5 @@
 import re
+import json
 import cv2
 import time
 import collections
@@ -9,11 +10,12 @@ import tkinter as tk
 from PIL import Image, ImageTk
 
 from src.vision.camera_loader import CameraLoader
-from src.inference.model_engine import ModelEngine
+from src.inference.model_engine import ModelEngine, ClassificationEngine
 from src.vision.breadboard_warper import BreadboardWarper
 from src.topology.grid_mapper import GridMapper
 from src.topology.circuit_analyzer import CircuitAnalyzer
 from src.vision.band_reader import BandReader
+from src.utils.crop_from_dataset import crop_body_for_classifier
 from src.ui.renderer import draw_results
 from src.ui.build_ui import UIBuilderMixin
 from src.ui.callback import CallbackMixin
@@ -40,6 +42,28 @@ def _parse_ohms(label: str) -> float:
         return 0.0
     v, p = float(m.group(1)), m.group(2) or ''
     return v * (1e3 if p == 'k' else 1e6 if p == 'M' else 1.0)
+
+
+def _cls_to_ohm_str(cls_name: str) -> str:
+    """Convert '6k8_1pct' → '6.8k Ohm 1%' (format parseable by _parse_ohms)."""
+    parts = cls_name.split('_')
+    if len(parts) != 2 or not parts[1].endswith('pct'):
+        return cls_name
+    val_s = parts[0]
+    tol   = parts[1].replace('pct', '%')
+    m = re.match(r'^(\d+)[Rr](\d*)$', val_s)
+    if m:
+        num = float(f"{m.group(1)}.{m.group(2) or '0'}")
+        return f"{num:g} Ohm {tol}" if num < 1000 else f"{num/1000:g}k Ohm {tol}"
+    m = re.match(r'^(\d+)[kK](\d*)$', val_s)
+    if m:
+        num = float(f"{m.group(1)}.{m.group(2) or '0'}")
+        return f"{num:g}k Ohm {tol}"
+    m = re.match(r'^(\d+)[mM](\d*)$', val_s)
+    if m:
+        num = float(f"{m.group(1)}.{m.group(2) or '0'}")
+        return f"{num:g}M Ohm {tol}"
+    return cls_name
 
 
 class OhmVisionApp(UIBuilderMixin, CallbackMixin):
@@ -72,10 +96,19 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
         self._padded    = None
 
         self.camera      = CameraLoader(camera_id=0, width=1280, height=720)
-        self.engine      = ModelEngine("models/Yolo_v8s_pose_weights_int8.onnx")
+        self.engine      = ModelEngine('yolo',"models/Yolo_v8n_pose_weights_2.onnx")
+        self.class_names = {0: 'resistor', 1: 'resistor_4b', 2: 'resistor_5b', 3: 'wire'}
+
+        _cls_meta = json.loads(open("models/classifier_resband_classes.json").read())
+        self.classifier = ClassificationEngine(
+            backend='onnx',
+            model_path='models/classifier_resband.onnx',
+            num_classes=len(_cls_meta['classes']),
+            device='cpu',
+            class_names=_cls_meta['classes'],
+        )
         self.transformer = BreadboardWarper(output_width=810, output_height=540)
         self.grid_mapper = GridMapper(target_w=810, target_h=540)
-        self.class_names = self.engine.engine.names
         self.show_grid   = False
 
         # Inference pipeline runs in a background thread so tkinter never blocks
@@ -157,22 +190,21 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
                     lead_idx = idx  # fallback ถ้าไม่มี lead class ในเฟรม
 
                 try:
-                    crop = self.band_reader.crop_from_body_keypoints(warped_snap, kp_snap[idx])
+                    kps     = kp_snap[idx]
+                    visible = [kp for kp in kps if kp[2] >= 0.5]
+                    crop    = crop_body_for_classifier(
+                                  warped_snap, visible[0][:2], visible[-1][:2]
+                              ) if len(visible) >= 2 else None
                     if crop is not None:
-                        cv2.imwrite(f"debug_crop_{lead_idx}.jpg", crop)
-                        res, bands, _ = self.band_reader.calculate(crop, band_count_hint=hint)
-                        debug_img = self.band_reader.annotate_crop(crop, bands, res)
-                        cv2.imwrite(f"debug_bands_{lead_idx}.jpg", debug_img)
-                        hsv_str = [(b['color'], int(b['mean_hsv'][0]),
-                                    int(b['mean_hsv'][1]), int(b['mean_hsv'][2]))
-                                   for b in bands]
-                        print(f"[Band{lead_idx}] hint={hint} {hsv_str} → {res}")
+                        cls_name, conf = self.classifier.predict(crop)
+                        res = _cls_to_ohm_str(cls_name)
+                        print(f"[Cls{lead_idx}] hint={hint} → {cls_name} ({conf:.2f}) → {res}")
                     else:
                         res = "?"
-                        print(f"[Band{lead_idx}] crop=None")
+                        print(f"[Cls{lead_idx}] crop=None")
                 except Exception as e:
                     res = "?"
-                    print(f"[Band] idx={lead_idx} error: {e}")
+                    print(f"[Cls] idx={lead_idx} error: {e}")
 
                 buf = self._ohm_votes.setdefault(lead_idx, collections.deque(maxlen=VOTE_SIZE))
                 buf.append(res)

@@ -1,29 +1,13 @@
-"""
-crop_from_dataset.py
-────────────────────
-อ่าน COCO JSON จาก Roboflow dataset แล้ว crop resistor body
-ออกมาเก็บใน crops/unsorted/ สำหรับนำไปจัดเป็น classifier dataset
-
-Usage:
-    python -m src.utils.crop_from_dataset \
-        --json  data/processed/yolo-pose/images/train/_annotations.coco.json \
-        --imgs  data/processed/yolo-pose/images/train \
-        --out   crops/unsorted
-
-หลังรัน:
-    เปิด crops/unsorted/ แล้วย้ายแต่ละ crop ไปไว้ใน
-    data/classify/train/<class_name>/  ตามค่าความต้านทานจริง
-"""
-
 import json
+import shutil
 import argparse
 import cv2
 import numpy as np
 from pathlib import Path
 
 
-# Class names ใน COCO ที่เป็น resistor body
-_BODY_CLASSES = {'resistor'}
+# Class names ใน COCO ที่ต้องการ crop body
+_BODY_CLASSES = {'resistor_4b', 'resistor_5b'}
 
 
 def _affine_crop(img: np.ndarray, p0: np.ndarray, p1: np.ndarray) -> np.ndarray | None:
@@ -36,9 +20,9 @@ def _affine_crop(img: np.ndarray, p0: np.ndarray, p1: np.ndarray) -> np.ndarray 
 
     cx, cy   = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
     cos_a, sin_a = dx / length, dy / length
-    perp_pad = int(np.clip(length * 0.20, 12, 30))
+    perp_pad = int(np.clip(length * 0.35, 25, 60))
 
-    out_w = int(length) + 60
+    out_w = int(length) + 24
     out_h = perp_pad * 2
 
     tx = cx - (out_w / 2) * cos_a + (out_h / 2) * sin_a
@@ -51,112 +35,184 @@ def _affine_crop(img: np.ndarray, p0: np.ndarray, p1: np.ndarray) -> np.ndarray 
     return crop if crop.size > 0 else None
 
 
-def _mask_body(crop: np.ndarray) -> np.ndarray:
-    """
-    1. ถมดำนอก body (ตัด lead ซ้าย-ขวา + breadboard บน-ล่าง)
-    2. Shadow ที่พาดผ่าน body → เติมด้วย median ของพิกเซลรอบข้าง
-    """
+_CLAHE = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(4, 4)) # อัปเกรด ClipLimit เพิ่ม Contrast แถบสีให้ชัดขึ้น
+
+def _mask_body(crop: np.ndarray) -> np.ndarray | None:
     if crop is None or crop.size == 0:
-        return crop
-
+        return None
     h, w = crop.shape[:2]
+    if h < 10 or w < 10:
+        return None
+
+    # 1. แปลงภาพและเบลอเพื่อลดสัญญาณรบกวน
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (9, 9), 3)
+    blur = cv2.GaussianBlur(gray, (5, 5), 1)
 
-    # ── Step 1: หา x-range ของ body (ตัด lead ซ้าย-ขวา) ────────
-    r0, r1 = int(h * 0.20), int(h * 0.80)
-    col_mean = np.mean(blur[r0:r1], axis=0).astype(float)
-    thr_c, _ = cv2.threshold(
-        np.clip(col_mean, 0, 255).astype(np.uint8).reshape(1, -1),
-        0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-    )
-    body_cols = np.where(col_mean > float(thr_c))[0]
-    if len(body_cols) > int(w * 0.15):
-        x0 = max(0, int(body_cols[0])  - 2)
-        x1 = min(w, int(body_cols[-1]) + 3)
-    else:
-        x0, x1 = 0, w
+    # 2. คัดแยกพิกเซลที่ไม่ใช่ขอบดำ (ขอบดำเกิดจากตอนหมุนภาพ Affine)
+    valid = blur > 8
+    valid_vals = blur[valid]
+    if len(valid_vals) < 50:
+        return None
+        
+    # 3. ใช้ Otsu Threshold แยกตัวต้านทานออกจากฉากหลัง
+    thr, _ = cv2.threshold(valid_vals.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    _, binary = cv2.threshold(blur, int(thr), 255, cv2.THRESH_BINARY_INV)
+    binary[~valid] = 0   
 
-    # ── Step 2: หา y-range ของ body (ตัด breadboard บน-ล่าง) ────
-    cx0, cx1 = max(0, int(w * 0.25)), min(w, int(w * 0.75))
-    row_mean = np.mean(blur[:, cx0:cx1], axis=1).astype(float)
-    thr_r, _ = cv2.threshold(
-        np.clip(row_mean, 0, 255).astype(np.uint8).reshape(1, -1),
-        0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-    )
-    body_rows = np.where(row_mean > float(thr_r))[0]
-    if len(body_rows) > int(h * 0.15):
-        y0 = max(0, int(body_rows[0])  - 2)
-        y1 = min(h, int(body_rows[-1]) + 3)
+    # 4. หาขอบเขตแกน X (สแกนแนวตั้งเพื่อตัดลวดขาเหล็กซ้ายขวาทิ้ง)
+    col_cover = binary.sum(axis=0) / 255.0   
+    body_thr  = h * 0.25  # พิกเซลตัวต้านทานต้องหนาอย่างน้อย 25% ของความสูง
+    is_body   = col_cover >= body_thr
+
+    if not is_body.any():
+        is_body = col_cover >= h * 0.10 # ลดเกณฑ์ถ้าตัวเล็ก
+    if not is_body.any():
+        return None
+
+    xs = np.where(is_body)[0]
+    x0 = max(0, int(xs[0]) - 3) # เผื่อขอบ (Padding) ซ้าย 3 พิกเซล
+    x1 = min(w, int(xs[-1]) + 4) # เผื่อขอบ (Padding) ขวา 4 พิกเซล
+
+    # 5. หาขอบเขตแกน Y (สแกนแนวนอนเพื่อตัดขอบบนล่างทิ้ง)
+    row_cover = binary[:, x0:x1].sum(axis=1) / 255.0   
+    row_thr   = (x1 - x0) * 0.10
+    is_row    = row_cover >= row_thr
+
+    if is_row.any():
+        ys = np.where(is_row)[0]
+        y0 = max(0, int(ys[0]) - 3)
+        y1 = min(h, int(ys[-1]) + 4)
     else:
         y0, y1 = 0, h
 
-    # ── Step 3: ถมดำนอก body ────────────────────────────────────
-    result = np.zeros_like(crop)
-    result[y0:y1, x0:x1] = crop[y0:y1, x0:x1]
+    # 6. ครอปตัดเป็น "สี่เหลี่ยมเต็มใบ" (ไม่เจาะรูเนื้อข้างใน)
+    tight = crop[y0:y1, x0:x1]
 
-    # ── Step 4: ตรวจ shadow ภายใน body → เติมด้วย median ───────
-    body = result[y0:y1, x0:x1]
-    bh, bw = body.shape[:2]
-    body_gray = cv2.cvtColor(body, cv2.COLOR_BGR2GRAY)
+    # 7. เช็กและหมุนเป็นแนวนอน
+    th, tw = tight.shape[:2]
+    if tw > 0 and th > tw * 1.05:
+        tight = cv2.rotate(tight, cv2.ROTATE_90_CLOCKWISE)
 
-    # kernel ต้องเป็นเลขคี่และไม่ใหญ่กว่า body
-    k_detect = min(21, bh | 1, bw | 1)
-    k_fill   = min(31, bh | 1, bw | 1)
-    if k_detect < 3 or k_fill < 3:
-        return result
-
-    # Shadow: พิกเซลที่มืดกว่า local median เกิน threshold
-    local_med = cv2.medianBlur(body_gray, k_detect)
-    shadow_mask = ((local_med.astype(int) - body_gray.astype(int)) > 40).astype(np.uint8) * 255
-
-    if shadow_mask.any():
-        filled = cv2.medianBlur(body, k_fill)
-        body[shadow_mask > 0] = filled[shadow_mask > 0]
-        result[y0:y1, x0:x1] = body
-
-    return result
+    return tight
 
 
-def crop_from_coco(json_path: str, img_dir: str, out_dir: str) -> None:
+def _inv_letterbox_kpts(kpts_flat: list, proc_w: int, proc_h: int,
+                        orig_w: int, orig_h: int) -> list:
+    scale = min(proc_w / orig_w, proc_h / orig_h)
+    pad_x = (proc_w - orig_w * scale) / 2
+    pad_y = (proc_h - orig_h * scale) / 2
+    out = []
+    for i in range(0, len(kpts_flat), 3):
+        x = (kpts_flat[i]     - pad_x) / scale
+        y = (kpts_flat[i + 1] - pad_y) / scale
+        v =  kpts_flat[i + 2]
+        out.extend([x, y, v])
+    return out
+
+
+_MIN_CROP_W = 50   # pixels — crop เล็กกว่านี้ไม่มีรายละเอียดแถบสีเพียงพอ
+
+
+def _postprocess_crop(crop: np.ndarray) -> np.ndarray | None:
+    if crop is None or crop.size == 0:
+        return None
+
+    # หาพื้นที่ที่ไม่ใช่สีดำ (ส่วนที่เป็นเนื้องานของตัวต้านทาน)
+    gray_orig = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    valid_mask = gray_orig > 5
+
+    if valid_mask.sum() < 50:
+        return None
+
+    # 1. CLAHE (สกัดสีให้เด้งขึ้นโดยดึง Contrast ใน Channel L ของแกน LAB)
+    lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
+    lab[:, :, 0] = _CLAHE.apply(lab[:, :, 0])
+    enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+    # 2. ป้องกันภาพเบลอหลุดรอด (คำนวณ Blur Variance *เฉพาะจุดที่ไม่ใช่พื้นดำ*)
+    gray_enhanced = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+    lap_var = float(cv2.Laplacian(gray_enhanced[valid_mask], cv2.CV_64F).var())
+    
+    # ลดเกณฑ์ลงเหลือ 15 เพื่อรับภาพที่พิกเซลแตกนิดหน่อยได้ (Data Realism)
+    if lap_var < 15.0: 
+        return None
+
+    # 3. Unsharp Masking (สูตรเร่งความคมชัดขอบแถบสี)
+    blurred = cv2.GaussianBlur(enhanced, (0, 0), sigmaX=1.0)
+    sharpened = cv2.addWeighted(enhanced, 1.5, blurred, -0.5, 0)
+
+    # 4. ฟื้นฟูการถมดำ! (ป้องกันไม่ให้กระบวนการ Sharpen ไปสร้าง Noise ขาวๆ ตรงขอบภาพ)
+    mask3 = np.stack([valid_mask] * 3, axis=-1)
+    final_result = np.where(mask3, sharpened, 0)
+
+    return final_result.astype(np.uint8)
+
+
+def crop_from_coco(json_path: str, img_dir: str, out_dir: str,
+                   raw_dir: str | None = None) -> None:
     json_path = Path(json_path)
     img_dir   = Path(img_dir)
     out_dir   = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir   = Path(raw_dir) if raw_dir else None
+
+    # clean previous output to avoid stale crops accumulating across runs
+    for cls in _BODY_CLASSES:
+        d = out_dir / cls
+        if d.exists():
+            shutil.rmtree(d)
 
     with open(json_path, encoding='utf-8') as f:
         data = json.load(f)
 
-    # Build lookup tables
     cat_id_to_name = {c['id']: c['name'].strip().lower()
                       for c in data['categories']}
     img_id_to_info = {img['id']: img for img in data['images']}
 
-    saved = skipped = 0
+    saved = skipped = raw_used = rejected_blur = rejected_small = rejected_body = 0
 
     for ann in data['annotations']:
         cat_name = cat_id_to_name.get(ann['category_id'], '')
         if cat_name not in _BODY_CLASSES:
             continue
 
-        img_info  = img_id_to_info[ann['image_id']]
-        img_file  = img_dir / img_info['file_name']
-        if not img_file.exists():
-            print(f"[skip] image not found: {img_file}")
-            skipped += 1
-            continue
-
-        # Keypoints: [x0,y0,v0, x1,y1,v1, ...]
+        img_info = img_id_to_info[ann['image_id']]
         kpts = ann.get('keypoints', [])
         if len(kpts) < 6:
             skipped += 1
             continue
 
-        # ใช้เฉพาะ kp0 และ kp1 (body endpoints)
-        # ข้าม kp ที่ visibility = 0 (not labeled)
+        # ── ลองใช้ภาพต้นฉบับจาก raw_dir ก่อน ──────────────────────────────
+        src_img  = None
+        src_kpts = kpts
+        if raw_dir is not None:
+            orig_name = (img_info.get('extra') or {}).get('name', '')
+            if orig_name:
+                raw_file = raw_dir / orig_name
+                if raw_file.exists():
+                    candidate = cv2.imread(str(raw_file))
+                    if candidate is not None:
+                        oh, ow = candidate.shape[:2]
+                        ph, pw = img_info['height'], img_info['width']
+                        src_kpts = _inv_letterbox_kpts(kpts, pw, ph, ow, oh)
+                        src_img  = candidate
+                        raw_used += 1
+
+        # ── fallback: ใช้ภาพ processed ──────────────────────────────────────
+        if src_img is None:
+            proc_file = img_dir / img_info['file_name']
+            if not proc_file.exists():
+                print(f"[skip] image not found: {proc_file}")
+                skipped += 1
+                continue
+            src_img = cv2.imread(str(proc_file))
+            if src_img is None:
+                skipped += 1
+                continue
+
+        # ── keypoints → kp_pairs ────────────────────────────────────────────
         kp_pairs = []
-        for i in range(0, min(len(kpts), 6), 3):
-            x, y, v = kpts[i], kpts[i+1], kpts[i+2]
+        for i in range(0, min(len(src_kpts), 6), 3):
+            x, y, v = src_kpts[i], src_kpts[i + 1], src_kpts[i + 2]
             if v > 0:
                 kp_pairs.append(np.array([x, y]))
 
@@ -164,26 +220,56 @@ def crop_from_coco(json_path: str, img_dir: str, out_dir: str) -> None:
             skipped += 1
             continue
 
-        img = cv2.imread(str(img_file))
-        if img is None:
-            skipped += 1
-            continue
-
-        crop = _affine_crop(img, kp_pairs[0], kp_pairs[-1])
+        crop = _affine_crop(src_img, kp_pairs[0], kp_pairs[-1])
         if crop is None:
             skipped += 1
             continue
         crop = _mask_body(crop)
+        if crop is None:
+            rejected_body += 1
+            continue
+        if crop.shape[1] < _MIN_CROP_W:
+            rejected_small += 1
+            continue
+        crop = _postprocess_crop(crop)
+        if crop is None:
+            rejected_blur += 1
+            continue
 
-        # ชื่อไฟล์: <image_stem>_ann<ann_id>_<class>.jpg
+        class_dir = out_dir / cat_name
+        class_dir.mkdir(parents=True, exist_ok=True)
         stem     = Path(img_info['file_name']).stem
-        out_name = f"{stem}_ann{ann['id']}_{cat_name}.jpg"
-        cv2.imwrite(str(out_dir / out_name), crop)
+        out_name = f"{stem}_ann{ann['id']}.jpg"
+        cv2.imwrite(str(class_dir / out_name), crop)
         saved += 1
 
-    print(f"Saved  : {saved} crops → {out_dir}")
+    total_attempted = saved + skipped + rejected_blur + rejected_small + rejected_body
+    src_note   = f", from_raw={raw_used}/{total_attempted}" if raw_dir else ""
+    blur_note  = f", rejected_blur={rejected_blur}"   if rejected_blur  else ""
+    small_note = f", rejected_small={rejected_small}" if rejected_small else ""
+    body_note  = f", rejected_body={rejected_body}"   if rejected_body  else ""
+    print(f"Saved  : {saved} crops{src_note}{blur_note}{small_note}{body_note} → {out_dir}/{{resistor_4b,resistor_5b}}/")
     print(f"Skipped: {skipped} annotations")
-    print(f"\nNext step: เปิด {out_dir} แล้วย้าย crop ไปใน data/classify/train/<class_name>/")
+    print(f"\nNext step: ใน {out_dir}/<class>/ แยก crop ไปใน data/classify/train/<ohm_value>/")
+
+
+def crop_body_for_classifier(img: np.ndarray,
+                             p0: np.ndarray,
+                             p1: np.ndarray) -> np.ndarray | None:
+    """
+    Full crop pipeline identical to training data generation.
+    Input: BGR numpy array + two endpoint keypoints (x, y).
+    Output: BGR crop ready for ClassificationEngine.predict(), or None.
+    """
+    crop = _affine_crop(img, p0, p1)
+    if crop is None:
+        return None
+    crop = _mask_body(crop)
+    if crop is None:
+        return None
+    if crop.shape[1] < _MIN_CROP_W:
+        return None
+    return _postprocess_crop(crop)
 
 
 def main():
@@ -196,27 +282,24 @@ def main():
 
 
 if __name__ == '__main__':
-    OUT_DIR  = r"./data/crops"
-    LABEL_DIR  = r"./data/labels/coco_keypoint"
-    TRAIN_DIR = r"./data/processed/yolo-pose/images/train"
-    # คง split เดิมที่ Roboflow แบ่งไว้แล้ว → crop แต่ละ split ออกแยกกัน
+    RAW_DIR = 'data/raw/dataset_capture'   # ภาพต้นฉบับ — None ถ้าไม่มี
     SPLITS = [
         {
-            'json': 'data/processed/yolo-pose/images/train/_annotations.coco.json',
-            'imgs': 'data/processed/yolo-pose/images/train',
-            'out':  'crops/train',
+            'json': 'data/labels/coco_keypoint/train/_annotations.coco.json',
+            'imgs': 'data/labels/coco_keypoint/train',
+            'out':  'data/processed/crops/train',
         },
         {
             'json': 'data/labels/coco_keypoint/valid/_annotations.coco.json',
             'imgs': 'data/labels/coco_keypoint/valid',
-            'out':  'crops/val',
+            'out':  'data/processed/crops/val',
         },
         {
             'json': 'data/labels/coco_keypoint/test/_annotations.coco.json',
             'imgs': 'data/labels/coco_keypoint/test',
-            'out':  'crops/test',
+            'out':  'data/processed/crops/test',
         },
     ]
     for s in SPLITS:
         print(f"\n── {s['out']} ──")
-        crop_from_coco(s['json'], s['imgs'], s['out'])
+        crop_from_coco(s['json'], s['imgs'], s['out'], raw_dir=RAW_DIR)
