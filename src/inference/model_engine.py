@@ -96,6 +96,8 @@ class ClassificationEngine:
         if backend == 'yolo_cls':
             from ultralytics import YOLO
             self._model = YOLO(model_path)
+            if class_names is None:
+                self.class_names = list(self._model.names.values())
 
         elif backend == 'onnx':
             import onnxruntime as ort
@@ -178,8 +180,9 @@ class ClassificationEngine:
         return name, conf
 
     def _predict_yolo_cls(self, crop: np.ndarray) -> tuple[str, float]:
-        rgb  = self._preprocess(crop)
-        r    = self._model(rgb, verbose=False)[0]
+        # crop มาจาก crop_body_for_classifier ที่ apply CLAHE ไว้แล้ว
+        # ไม่เรียก _preprocess เพื่อป้องกัน double-CLAHE (ultralytics จัดการ BGR→RGB เอง)
+        r    = self._model(crop, verbose=False)[0]
         cid  = int(r.probs.top1)
         conf = float(r.probs.top1conf)
         name = self.class_names[cid] if cid < len(self.class_names) else str(cid)

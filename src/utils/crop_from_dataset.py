@@ -131,7 +131,7 @@ def _postprocess_crop(crop: np.ndarray) -> np.ndarray | None:
 
     # 2. ป้องกันภาพเบลอหลุดรอด (คำนวณ Blur Variance *เฉพาะจุดที่ไม่ใช่พื้นดำ*)
     gray_enhanced = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
-    lap_var = float(cv2.Laplacian(gray_enhanced[valid_mask], cv2.CV_64F).var())
+    lap_var = float(cv2.Laplacian(gray_enhanced, cv2.CV_64F)[valid_mask].var())
     
     # ลดเกณฑ์ลงเหลือ 15 เพื่อรับภาพที่พิกเซลแตกนิดหน่อยได้ (Data Realism)
     if lap_var < 15.0: 
@@ -285,18 +285,18 @@ if __name__ == '__main__':
     RAW_DIR = 'data/raw/dataset_capture'   # ภาพต้นฉบับ — None ถ้าไม่มี
     SPLITS = [
         {
-            'json': 'data/labels/coco_keypoint/train/_annotations.coco.json',
-            'imgs': 'data/labels/coco_keypoint/train',
+            'json': 'data/labels/raw_data_crop/train/_annotations.coco.json',
+            'imgs': 'data/labels/raw_data_crop/train',
             'out':  'data/processed/crops/train',
         },
         {
-            'json': 'data/labels/coco_keypoint/valid/_annotations.coco.json',
-            'imgs': 'data/labels/coco_keypoint/valid',
+            'json': 'data/labels/raw_data_crop/valid/_annotations.coco.json',
+            'imgs': 'data/labels/raw_data_crop/valid',
             'out':  'data/processed/crops/val',
         },
         {
-            'json': 'data/labels/coco_keypoint/test/_annotations.coco.json',
-            'imgs': 'data/labels/coco_keypoint/test',
+            'json': 'data/labels/raw_data_crop/test/_annotations.coco.json',
+            'imgs': 'data/labels/raw_data_crop/test',
             'out':  'data/processed/crops/test',
         },
     ]

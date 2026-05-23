@@ -19,14 +19,27 @@ DEFAULTS = {
     "pitch_y": 274,
 }
 
-# Class IDs — must match model training order
-CLS_RESISTOR_LEAD   = 0   # "resistor"     — ขา (leads) → circuit topology
-CLS_RESISTOR_4B     = 1   # "Resistor_4B"  — body 4-band → color reading
-CLS_RESISTOR_5B     = 2   # "Resistor_5B"  — body 5-band → color reading
-CLS_WIRE            = 3   # "wire"         → node merging
-CLS_RESISTOR_BODIES = {CLS_RESISTOR_4B, CLS_RESISTOR_5B}
+# ── Pose model ────────────────────────────────────────────────────────────────
+POSE_BACKEND = 'yolo'
+POSE_MODEL   = 'models/Yolo_v8n_pose_weights.onnx'
+POSE_CONF    = 0.5
+POSE_IOU     = 0.45
 
-#Theme colors (can be overridden by config)
+# ── Classification model (YOLO cls — จำแนกค่าความต้านทานจากภาพ crop ตัวต้านทาน)
+CLS_BACKEND  = 'yolo_cls'
+CLS_MODEL    = 'models/Cls Models/Yolo_v8n_cls.pt'
+CLS_DEVICE   = 'cpu'
+
+# ── Camera ────────────────────────────────────────────────────────────────────
+CAMERA_ID     = 0
+CAMERA_WIDTH  = 1280
+CAMERA_HEIGHT = 720
+
+# ── Pose model class IDs (2-class: resistor=0, wire=1) ───────────────────────
+CLS_RESISTOR = 0   # resistor → crop ระหว่าง 2 keypoints → classify ค่าความต้านทาน + topology
+CLS_WIRE     = 1   # wire → topology เท่านั้น (node merging)
+
+# Theme colors (can be overridden by config)
 BG       = "#1a1a2e"
 PANEL_BG = "#16213e"
 ACCENT   = "#0f3460"

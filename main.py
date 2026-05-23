@@ -20,9 +20,10 @@ from src.ui.renderer import draw_results
 from src.ui.build_ui import UIBuilderMixin
 from src.ui.callback import CallbackMixin
 from config.configs import (BG, GREEN, RED, DIM,
-                            CLS_RESISTOR_LEAD, CLS_WIRE,
-                            CLS_RESISTOR_4B, CLS_RESISTOR_5B,
-                            CLS_RESISTOR_BODIES)
+                            POSE_BACKEND, POSE_MODEL, POSE_CONF, POSE_IOU,
+                            CLS_BACKEND, CLS_MODEL, CLS_DEVICE,
+                            CAMERA_ID, CAMERA_WIDTH, CAMERA_HEIGHT,
+                            CLS_RESISTOR, CLS_WIRE)
 import config.configs as configs
 
 
@@ -95,17 +96,14 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
         self._fps_times = collections.deque(maxlen=30)
         self._padded    = None
 
-        self.camera      = CameraLoader(camera_id=0, width=1280, height=720)
-        self.engine      = ModelEngine('yolo',"models/Yolo_v8n_pose_weights_2.onnx")
-        self.class_names = {0: 'resistor', 1: 'resistor_4b', 2: 'resistor_5b', 3: 'wire'}
+        self.camera      = CameraLoader(camera_id=CAMERA_ID, width=CAMERA_WIDTH, height=CAMERA_HEIGHT)
+        self.engine      = ModelEngine(POSE_BACKEND, POSE_MODEL, conf=POSE_CONF, iou=POSE_IOU)
+        self.class_names = {0: 'resistor', 1: 'wire'}
 
-        _cls_meta = json.loads(open("models/classifier_resband_classes.json").read())
         self.classifier = ClassificationEngine(
-            backend='onnx',
-            model_path='models/classifier_resband.onnx',
-            num_classes=len(_cls_meta['classes']),
-            device='cpu',
-            class_names=_cls_meta['classes'],
+            backend=CLS_BACKEND,
+            model_path=CLS_MODEL,
+            device=CLS_DEVICE,
         )
         self.transformer = BreadboardWarper(output_width=810, output_height=540)
         self.grid_mapper = GridMapper(target_w=810, target_h=540)
@@ -161,33 +159,9 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
                     sum(p[1] for p in pts) / len(pts))
 
         def worker():
-            # สร้าง map: lead_idx → center point (สำหรับ association)
-            lead_centers = {}
-            for i, cid in enumerate(cls_snap):
-                if int(cid) == CLS_RESISTOR_LEAD and i < len(kp_snap):
-                    c = _kp_center(kp_snap[i])
-                    if c:
-                        lead_centers[i] = c
-
             for idx, cls_id in enumerate(cls_snap):
-                cid = int(cls_id)
-                if cid not in CLS_RESISTOR_BODIES or idx >= len(kp_snap):
+                if int(cls_id) != CLS_RESISTOR or idx >= len(kp_snap):
                     continue
-
-                hint = 4 if cid == CLS_RESISTOR_4B else 5
-
-                # จับคู่ body detection → lead detection ที่ใกล้ที่สุด
-                if lead_centers:
-                    bc = _kp_center(kp_snap[idx])
-                    if bc:
-                        lead_idx = min(
-                            lead_centers,
-                            key=lambda i: (lead_centers[i][0] - bc[0]) ** 2
-                                        + (lead_centers[i][1] - bc[1]) ** 2)
-                    else:
-                        lead_idx = idx
-                else:
-                    lead_idx = idx  # fallback ถ้าไม่มี lead class ในเฟรม
 
                 try:
                     kps     = kp_snap[idx]
@@ -198,25 +172,25 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
                     if crop is not None:
                         cls_name, conf = self.classifier.predict(crop)
                         res = _cls_to_ohm_str(cls_name)
-                        print(f"[Cls{lead_idx}] hint={hint} → {cls_name} ({conf:.2f}) → {res}")
+                        print(f"[Cls{idx}] → {cls_name} ({conf:.2f}) → {res}")
                     else:
                         res = "?"
-                        print(f"[Cls{lead_idx}] crop=None")
+                        print(f"[Cls{idx}] crop=None")
                 except Exception as e:
                     res = "?"
-                    print(f"[Cls] idx={lead_idx} error: {e}")
+                    print(f"[Cls] idx={idx} error: {e}")
 
-                buf = self._ohm_votes.setdefault(lead_idx, collections.deque(maxlen=VOTE_SIZE))
+                buf = self._ohm_votes.setdefault(idx, collections.deque(maxlen=VOTE_SIZE))
                 buf.append(res)
-                print(f"[Vote{lead_idx}] buf={list(buf)}")
+                print(f"[Vote{idx}] buf={list(buf)}")
 
                 winner, freq = Counter(buf).most_common(1)[0]
                 if freq >= VOTE_THRESH and winner not in BAD:
-                    self._ohm_cache[lead_idx]   = winner
-                    self._ohm_numeric[lead_idx] = _parse_ohms(winner)
+                    self._ohm_cache[idx]   = winner
+                    self._ohm_numeric[idx] = _parse_ohms(winner)
                 elif all(r in BAD for r in buf):
-                    self._ohm_cache[lead_idx] = "?"
-                    self._ohm_numeric.pop(lead_idx, None)
+                    self._ohm_cache[idx] = "?"
+                    self._ohm_numeric.pop(idx, None)
 
         self._band_thread = threading.Thread(target=worker, daemon=True)
         self._band_thread.start()
@@ -236,7 +210,7 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
 
         new_smooth = {}
         for idx in range(len(kp_arr)):
-            if int(class_ids[idx]) not in CLS_RESISTOR_BODIES:
+            if int(class_ids[idx]) != CLS_RESISTOR:
                 continue
             kps      = kp_arr[idx]          # (K, 3)
             vis_mask = kps[:, 2] > 0.3
@@ -307,9 +281,9 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
 
         success, base, results = pkg
 
-        # Trigger band reading เมื่อมี body class detection (4B หรือ 5B)
-        has_body = any(int(c) in CLS_RESISTOR_BODIES for c in results.class_ids)
-        if is_new and success and has_body and (self._band_thread is None or not self._band_thread.is_alive()):
+        # Trigger classification เมื่อมี resistor detection (class 0)
+        has_resistor = any(int(c) == CLS_RESISTOR for c in results.class_ids)
+        if is_new and success and has_resistor and (self._band_thread is None or not self._band_thread.is_alive()):
             kp_len = len(results.keypoints)
             smoothed_kps = (self._smooth_keypoints(results.keypoints, results.class_ids)
                             if kp_len > 0 else np.array([]))
@@ -323,16 +297,16 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
         if success:
             if self.show_grid:
                 display = self.grid_mapper.draw_grid_overlay(display)
-            lead_idxs = {i for i, cid in enumerate(results.class_ids)
-                         if int(cid) == CLS_RESISTOR_LEAD}
-            ohm_map   = {k: v for k, v in self._ohm_cache.items() if k in lead_idxs}
+            resistor_idxs = {i for i, cid in enumerate(results.class_ids)
+                             if int(cid) == CLS_RESISTOR}
+            ohm_map       = {k: v for k, v in self._ohm_cache.items() if k in resistor_idxs}
             draw_results(display, results, self.class_names, ohm_map=ohm_map)
             cv2.putText(display, "BOARD OK",
                         (12, 32), cv2.FONT_HERSHEY_DUPLEX, 1.0, (0, 220, 80), 2)
             self.status_badge.config(text="  BOARD OK  ", bg=GREEN, fg="#052e16")
 
             # Circuit topology — wires merge electrical nodes via Union-Find
-            resistor_ids = {idx for idx, cid in enumerate(results.class_ids) if int(cid) == CLS_RESISTOR_LEAD}
+            resistor_ids = {idx for idx, cid in enumerate(results.class_ids) if int(cid) == CLS_RESISTOR}
             wire_ids     = {idx for idx, cid in enumerate(results.class_ids) if int(cid) == CLS_WIRE}
             all_kp_data  = [
                 {'id': idx, 'keypoints': kps}

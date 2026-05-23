@@ -1,0 +1,27 @@
+{
+  "img_330_jpg.rf.493acc3b3760747831e37a2016d588511.jpg": {
+    "type": "Not Connected",
+    "total_ohm": "Infinity",
+    "tolerance": 0.0
+  },
+  "img_339_jpg.rf.fe57004b9ebe266e879eb2af0cc96e3c.jpg": {
+    "type": "Not Connected",
+    "total_ohm": "Infinity",
+    "tolerance": 0.0
+  },
+  "img_345_jpg.rf.7503c7b42d6b0c9b67a6c3ee2e0add49.jpg": {
+    "type": "Series",
+    "total_ohm": 11000,
+    "tolerance": 0.05
+  },
+  "img_346_jpg.rf.3dc2cf041f7e1a176320d1e2d04142be.jpg": {
+    "type": "Series",
+    "total_ohm": 7800,
+    "tolerance": 0.01
+  },
+  "img_350_jpg.rf.99e0e7b787e87d477d93c59065a4f24b.jpg": {
+    "type": "Series",
+    "total_ohm": 570,
+    "tolerance": 0.05
+  },
+}
