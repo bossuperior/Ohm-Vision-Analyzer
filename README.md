@@ -33,21 +33,21 @@ Grid Mapper -> NetworkX (Circuit Analysis & Results)
 
 ## Key Features
 
-* ** Automated Geometric Rectification: Implements ArUco marker detection to perform perspective transformation, normalizing the breadboard view regardless of camera angle.
-* ** Component Localization:**  Uses pose estimation models to precisely locate resistor bodies and wire connection points.
-* ** Automated Component Identification:**  Employs deep learning-based classification to read resistance values from color bands, ensuring robust detection even in variable lighting conditions.
-* ** Circuit Topology Reconstruction:**  Maps visual data to a grid-based graph representation, enabling topological analysis through NetworkX.
-* ** Graph-Theoretic Analysis:**  Calculates equivalent resistance and interprets circuit configurations (series, parallel, mixed, Wheatstone bridge) using nodal admittance matrix methods.
-* ** Modular Design:**  A decoupled architecture allows for independent benchmarking of detection and classification models.
+* Automated Geometric Rectification: Implements ArUco marker detection to perform perspective transformation, normalizing the breadboard view regardless of camera angle.
+* Component Localization:  Uses pose estimation models to precisely locate resistor bodies and wire connection points.
+* Automated Component Identification:  Employs deep learning-based classification to read resistance values from color bands, ensuring robust detection even in variable lighting conditions.
+* Circuit Topology Reconstruction:  Maps visual data to a grid-based graph representation, enabling topological analysis through NetworkX.
+* Graph-Theoretic Analysis:  Calculates equivalent resistance and interprets circuit configurations (series, parallel, mixed, Wheatstone bridge) using nodal admittance matrix methods.
+* Modular Design:  A decoupled architecture allows for independent benchmarking of detection and classification models.
 
 ---
 
 ## Technical Stack
-* ** Computer Vision:**  OpenCV
-* ** Pose Estimation and Classification Models.** 
-* ** Neural Network Frameworks:**  PyTorch, MMPose (RTMPose, HigherHRNet).
-* ** Circuit & Graph Analysis:**  NetworkX, NumPy, SciPy.
-* ** Development:**  Python 3.10+, PEP 8 compliant modular structure.
+* Computer Vision:  OpenCV
+* Pose Estimation and Classification Models.
+* Neural Network Frameworks:  PyTorch, MMPose (RTMPose, HigherHRNet).
+* Circuit & Graph Analysis:  NetworkX, NumPy, SciPy.
+* Development:  Python 3.10+, PEP 8 compliant modular structure.
 
 ---
 
@@ -65,5 +65,5 @@ config/: Configuration files and hyperparameters.
 ```
 
 ## Contributors
-* ** 6652300371 Chaloemphon Bannarak ** 
-* ** 6652300931 Komkrit Tungtatiyapat ** 
+* 6652300371 Chaloemphon Bannarak 
+* 6652300931 Komkrit Tungtatiyapat 
