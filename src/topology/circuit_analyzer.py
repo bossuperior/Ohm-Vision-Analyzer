@@ -58,8 +58,10 @@ class CircuitAnalyzer:
 
     # ── Topology detection ─────────────────────────────────────────────────────
     def _topology(self, components: List[Dict]) -> str:
-        # ตรวจ connectivity ก่อน — ถ้า subgraph แยกกัน ไม่มีการเชื่อมต่อ
         if not self._is_connected(components):
+            # 4 ตัวต้านทานแต่ขาด edge เดียว (≤2 subgraph) → น่าจะเป็น Wheatstone Bridge
+            if len(components) == 4 and self._count_subgraphs(components) <= 2:
+                return 'Wheatstone Bridge'
             return 'Not Connected'
 
         degree: Dict[str, int] = defaultdict(int)
@@ -72,19 +74,45 @@ class CircuitAnalyzer:
         if len(set(pairs)) == 1:
             return 'Parallel'
 
-        # Ring: ทุก node มี degree=2 และ #node == #component
-        if (all(d == 2 for d in degree.values())
-                and len(degree) == len(components)):
-            if len(components) == 4:
-                return 'Wheatstone Bridge'
-            return 'Ring'
+        n_nodes = len(degree)
+        max_deg = max(degree.values())
+        n_term  = sum(1 for d in degree.values() if d == 1)
+
+        # Ring: ทุก node มี degree=2 และ #node == #component (สมบูรณ์)
+        if all(d == 2 for d in degree.values()) and n_nodes == len(components):
+            return 'Wheatstone Bridge' if len(components) == 4 else 'Ring'
+
+        # Wheatstone Bridge (ผ่อนเงื่อนไข) — 4 ตัวต้านทาน
+        # รองรับ keypoint ผิดตำแหน่งหลายกรณี: split-node, merge-node, extra junction
+        if len(components) == 4 and max_deg <= 4 and 3 <= n_nodes <= 6:
+            return 'Wheatstone Bridge'
 
         # Series: ไม่มี branching, มี terminal 2 จุดพอดี
-        if (max(degree.values()) <= 2
-                and sum(1 for d in degree.values() if d == 1) == 2):
+        if max_deg <= 2 and n_term == 2:
             return 'Series'
 
         return 'Mixed'
+
+    def _count_subgraphs(self, components: List[Dict]) -> int:
+        adj: Dict[str, set] = defaultdict(set)
+        all_nodes: Set[str] = set()
+        for c in components:
+            adj[c['node1']].add(c['node2'])
+            adj[c['node2']].add(c['node1'])
+            all_nodes.update([c['node1'], c['node2']])
+        visited: Set[str] = set()
+        count = 0
+        for node in all_nodes:
+            if node not in visited:
+                count += 1
+                queue = [node]
+                while queue:
+                    v = queue.pop()
+                    if v in visited:
+                        continue
+                    visited.add(v)
+                    queue.extend(adj[v] - visited)
+        return count
 
     def _is_connected(self, components: List[Dict]) -> bool:
         """BFS — ตรวจว่า component ทุกตัวอยู่ใน connected graph เดียวกัน"""

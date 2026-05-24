@@ -34,7 +34,7 @@ def transform_box(box, matrix):
 
 
 # ── Main draw function ────────────────────────────────────────────────────────
-def draw_results(frame, results, class_names, matrix=None, ohm_map=None):
+def draw_results(frame, results, class_names, matrix=None, ohm_map=None, show_keypoints=True):
     """Draw bounding boxes, keypoints, body line, and optional ohm readings."""
     for i, (box, cls_id, score) in enumerate(
             zip(results.boxes, results.class_ids, results.scores)):
@@ -71,7 +71,7 @@ def draw_results(frame, results, class_names, matrix=None, ohm_map=None):
                         cv2.FONT_HERSHEY_SIMPLEX, fscale, txt_col, thick)
 
         # Keypoints + body line
-        if len(results.keypoints) > i:
+        if show_keypoints and len(results.keypoints) > i:
             kp_data     = results.keypoints[i]
             is_resistor = (name == "resistor")
             raw_kps     = [(j, kp[:2]) for j, kp in enumerate(kp_data)

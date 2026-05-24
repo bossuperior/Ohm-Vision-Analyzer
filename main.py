@@ -300,7 +300,7 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
             resistor_idxs = {i for i, cid in enumerate(results.class_ids)
                              if int(cid) == CLS_RESISTOR}
             ohm_map       = {k: v for k, v in self._ohm_cache.items() if k in resistor_idxs}
-            draw_results(display, results, self.class_names, ohm_map=ohm_map)
+            draw_results(display, results, self.class_names, ohm_map=ohm_map, show_keypoints=False)
             cv2.putText(display, "BOARD OK",
                         (12, 32), cv2.FONT_HERSHEY_DUPLEX, 1.0, (0, 220, 80), 2)
             self.status_badge.config(text="  BOARD OK  ", bg=GREEN, fg="#052e16")
@@ -322,21 +322,24 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
                     c['ohms'] = self._ohm_numeric.get(c['id'], 0.0)
                 info = self.circuit_analyzer.analyze(resistors)
 
-                # Majority-vote over last 5 inference results to suppress flip-flop
+                # Majority-vote: show only when stable (≥3/5 agree)
                 self._topo_votes.append(info['type'])
-                voted_type = Counter(self._topo_votes).most_common(1)[0][0]
-                if info['type'] == voted_type:
-                    self._stable_info = info   # accept when current matches majority
+                cnt = Counter(self._topo_votes)
+                voted_type, voted_freq = cnt.most_common(1)[0]
+                is_stable = voted_freq >= 3
 
-                self._update_circuit_ui(self._stable_info)
-                t_display = self._stable_info['type']
-                if t_display not in ('—',):
-                    col = _CIRCUIT_COLORS.get(t_display, '#888888')
-                    bgr = tuple(int(col[i:i+2], 16) for i in (5, 3, 1))
-                    cv2.putText(display, t_display,
-                                (12, 64), cv2.FONT_HERSHEY_DUPLEX, 0.9, bgr, 2)
+                if is_stable:
+                    if info['type'] == voted_type:
+                        self._stable_info = info
+                    self._update_circuit_ui(self._stable_info)
+                    t_display = self._stable_info['type']
+                    if t_display not in ('—',):
+                        col = _CIRCUIT_COLORS.get(t_display, '#888888')
+                        bgr = tuple(int(col[i:i+2], 16) for i in (5, 3, 1))
+                        cv2.putText(display, t_display,
+                                    (12, 64), cv2.FONT_HERSHEY_DUPLEX, 0.9, bgr, 2)
         else:
-            draw_results(display, results, self.class_names)
+            draw_results(display, results, self.class_names, show_keypoints=False)
             cv2.putText(display, "SEARCHING FOR ARUCO TAGS...",
                         (12, 42), cv2.FONT_HERSHEY_DUPLEX, 0.85, (80, 80, 255), 2)
             self.status_badge.config(text="  SEARCHING  ", bg=RED, fg="white")

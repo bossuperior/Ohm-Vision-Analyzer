@@ -24,4 +24,230 @@
     "total_ohm": 570,
     "tolerance": 0.05
   },
+  "img_354_jpg.rf.5288163c7efa681213f49c3323f66609.jpg": {
+    "type": "Series",
+    "total_ohm": 106800,
+    "tolerance": 0.01
+  },
+  "img_363_jpg.rf.46c5a013154991b3f439d7759ace01d7.jpg": {
+    "type": "Series",
+    "total_ohm": 490,
+    "tolerance": 0.05
+  },
+  "img_369_jpg.rf.cee492cb58a514087a237ad50388dd0c.jpg": {
+    "type": "Series",
+    "total_ohm": 1390,
+    "tolerance": 0.01
+  },
+  "img_373_jpg.rf.b34b446403279653a0c3359f19a6a086.jpg": {
+    "type": "Parallel",
+    "total_ohm": 681.66,
+    "tolerance": 0.05
+  },
+  "img_377_jpg.rf.74e70b21ab4fe67abe23f00907525796.jpg": {
+    "type": "Parallel",
+    "total_ohm": 272.92,
+    "tolerance": 0.05
+  },
+  "img_379_jpg.rf.07d3b92913d2fce4cd0261079766d9e0.jpg": {
+    "type": "Parallel",
+    "total_ohm": 82.65,
+    "tolerance": 0.05
+  },
+  "img_383_jpg.rf.61682aed304b8ebed80466520addb040.jpg": {
+    "type": "Parallel",
+    "total_ohm": 224.87,
+    "tolerance": 0.05
+  },
+  "img_393_jpg.rf.c4d3a2c283d11d70a542d25b444b17ff.jpg": {
+    "type": "Parallel",
+    "total_ohm": 4.04,
+    "tolerance": 0.05
+  },
+  "img_400_jpg.rf.54ef4c18fa7f570dd992304875102c2f.jpg": {
+    "type": "Mixed",
+    "total_ohm": 1004.08,
+    "tolerance": 0.05
+  },
+  "img_410_jpg.rf.44ebb9b529e99df003a203745f515b79.jpg": {
+    "type": "Mixed",
+    "total_ohm": 1261.79,
+    "tolerance": 0.05
+  },
+  "img_411_jpg.rf.62fa8655626e42edef7cb3c270784fdf.jpg": {
+    "type": "Mixed",
+    "total_ohm": 1261.79,
+    "tolerance": 0.05
+  },
+  "img_414_jpg.rf.c63acd344e7a385a0a8fed40d669ac8c.jpg": {
+    "type": "Wheatstone (Unbalanced)",
+    "total_ohm": 995.4,
+    "tolerance": 0.05
+  },
+  "img_416_jpg.rf.6791f9c4d5a065635b450b206bc4e94f.jpg": {
+    "type": "Wheatstone (Unbalanced)",
+    "total_ohm": 995.4,
+    "tolerance": 0.05
+  },
+  "img_430_jpg.rf.fbc0df119d235660c40e900c56154c25.jpg": {
+    "type": "Wheatstone (Unbalanced)",
+    "total_ohm": 1669.4,
+    "tolerance": 0.05
+  },
+  "img_431_jpg.rf.1b695d619606f4e67f26ac23f249b058.jpg": {
+    "type": "Wheatstone (Unbalanced)",
+    "total_ohm": 1669.4,
+    "tolerance": 0.05
+  },
+  "img_432_jpg.rf.15a2ab891934a8790e3d43c578d2df92.jpg": {
+    "type": "Wheatstone (Unbalanced)",
+    "total_ohm": 1669.4 ,
+    "tolerance": 0.05
+  },
+  "img_435_jpg.rf.d9a96572440ef4257575a134be377f54.jpg": {
+    "type": "Wheatstone (Unbalanced)",
+    "total_ohm": 550.5,
+    "tolerance": 0.05
+  },
+  "img_436_jpg.rf.1845efa168dd3f6f9b2593c6069b5b9a.jpg": {
+    "type": "Wheatstone (Unbalanced)",
+    "total_ohm": 550.5,
+    "tolerance": 0.05
+  },
+  "img_438_jpg.rf.aff52316ccb88cf5e456e63ed84dd21e.jpg": {
+    "type": "Wheatstone (Unbalanced)",
+    "total_ohm": 471.9,
+    "tolerance": 0.05
+  },
+  "img_462_jpg.rf.a43b4fa906709cfa3569ad198e773534.jpg": {
+    "type": "S",
+    "total_ohm": 820,
+    "tolerance": 0.01
+  },
+  "img_478_jpg.rf.b7af5647c518f5945bad51e672131bce.jpg": {
+    "type": "S",
+    "total_ohm": 390,
+    "tolerance": 0.05
+  },
+  "img_481_jpg.rf.337e0436e9a70bbe55ca28f4a6e55446.jpg": {
+    "type": "S",
+    "total_ohm": 100,
+    "tolerance": 0.05
+  },
+  "img_486_jpg.rf.504777f94dcc50b0c01d0f05a06206cc.jpg": {
+    "type": "S",
+    "total_ohm": 4700,
+    "tolerance": 0.05
+  },
+  "img_489_jpg.rf.a055cbcf823a1ca1fdea9effbb9890df.jpg": {
+    "type": "S",
+    "total_ohm": 10000,
+    "tolerance": 0.05
+  },
+  "img_494_jpg.rf.41f48a4f4b19ed00810c2918b3489e62.jpg": {
+    "type": "S",
+    "total_ohm": 0,
+    "tolerance": 0.0
+  },
+  "img_497_jpg.rf.af940fa553bd476a1df6a3ddab799bf1.jpg": {
+    "type": "S",
+    "total_ohm": 0,
+    "tolerance": 0.0
+  },
+  "img_503_jpg.rf.0306dadb124196fb695dcf0f44e8282e.jpg": {
+    "type": "S",
+    "total_ohm": 0,
+    "tolerance": 0.0
+  },
+  "img_507_jpg.rf.568fd4022923c7b18aa06caa0632e000.jpg": {
+    "type": "S",
+    "total_ohm": 0,
+    "tolerance": 0.0
+  },
+  "img_512_jpg.rf.7a70dfbf9109b6825983a4eb2c4224af.jpg": {
+    "type": "S",
+    "total_ohm": 910,
+    "tolerance": 0.01
+  },
+  "img_515_jpg.rf.f17a6de923076df8bcf9326ac96cfa58.jpg": {
+    "type": "S",
+    "total_ohm": 6800,
+    "tolerance": 0.01
+  },
+  "img_516_jpg.rf.47e895cb0d07664fb0424d587cd9edbe.jpg": {
+    "type": "S",
+    "total_ohm": 6800,
+    "tolerance": 0.01
+  },
+  "img_517_jpg.rf.4a0f248a4e1615f30c2de6311875ec93.jpg": {
+    "type": "S",
+    "total_ohm": 100000,
+    "tolerance": 0.01
+  },
+  "img_521_jpg.rf.c9c37417b59ea1227630796134e8ce57.jpg": {
+    "type": "S",
+    "total_ohm": 390,
+    "tolerance": 0.05
+  },
+  "img_525_jpg.rf.734152b67c6523c89e749972100d9a83.jpg": {
+    "type": "S",
+    "total_ohm": 470,
+    "tolerance": 0.05
+  },
+  "img_529_jpg.rf.a61d1f0c419919c49c01f50fd32da39f.jpg": {
+    "type": "S",
+    "total_ohm": 1000,
+    "tolerance": 0.05
+  },
+  "img_530_jpg.rf.01db631cf044cad9eab338ac79f70783.jpg": {
+    "type": "Mixed",
+    "total_ohm": 4959,
+    "tolerance": 0.05
+  },
+  "img_532_jpg.rf.20b17581b86fc16ff824c5106aa59df7.jpg": {
+    "type": "Mixed",
+    "total_ohm": 488.55,
+    "tolerance": 0.05
+  },
+  "img_534_jpg.rf.6f06da1c8a5fb934c5d49b95526e88ca.jpg": {
+    "type": "Mixed",
+    "total_ohm": 1375.4,
+    "tolerance": 0.05
+  },
+  "img_535_jpg.rf.9c8e1a0b2c5d1f3e7a4b6c8d9e2f1a4b.jpg": {
+    "type": "Not Connected",
+    "total_ohm": "Infinity",
+    "tolerance": 0.0
+  },
+  "img_536_jpg.rf.a2daa466a9571cf314bd3620287fbf51.jpg": {
+    "type": "Not Connected",
+    "total_ohm": "Infinity",
+    "tolerance": 0.0
+  },
+  "img_538_jpg.rf.c8cf61fc756ec651073b987bd07c2266.jpg": {
+    "type": "Not Connected",
+    "total_ohm": "Infinity",
+    "tolerance": 0.0
+  },
+  "img_540_jpg.rf.a454fe2b04d246ec864a5832fbaad4b8.jpg": {
+    "type": "Parallel",
+    "total_ohm": 813.3 ,
+    "tolerance": 0.01
+  },
+  "img_541_jpg.rf.0374d9f2b6737d96158644942c48ab86.jpg": {
+    "type": "Parallel",
+    "total_ohm": 319.7 ,
+    "tolerance": 0.05
+  },
+  "img_542_jpg.rf.4f4bedd98fc9ad91142f4f1a13a01f7f.jpg": {
+    "type": "Parallel",
+    "total_ohm": 347.6 ,
+    "tolerance": 0.05
+  },
+  "img_544_jpg.rf.ca077e1db421c4a90cdbb6333eb7f37c.jpg": {
+    "type": "Series",
+    "total_ohm": 1390 ,
+    "tolerance": 0.05
+  }
+
 }

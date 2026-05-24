@@ -21,7 +21,7 @@ DEFAULTS = {
 
 # ── Pose model ────────────────────────────────────────────────────────────────
 POSE_BACKEND = 'yolo'
-POSE_MODEL   = 'models/Yolo_v8n_pose_weights.onnx'
+POSE_MODEL   = 'models/Pose Model/Yolo_v8n/Yolo_v8n_pose_weights.onnx'
 POSE_CONF    = 0.5
 POSE_IOU     = 0.45
 
