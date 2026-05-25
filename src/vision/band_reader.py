@@ -8,10 +8,9 @@ _BAND_BGR = {
     'BLACK':  (30,  30,  30),   'BROWN':  (30,  80, 160),
     'RED':    (0,   0,  220),   'ORANGE': (0,  140, 255),
     'YELLOW': (0,  220, 220),   'GOLD':   (0,  190, 200),
-    'GREEN':  (0,  160,  50),   'BLUE':   (220,  80,   0),
-    'VIOLET': (180,  0,  160),  'GRAY':   (140, 140, 140),
+    'BLUE':   (220,  80,   0),  'VIOLET': (180,  0,  160),
     'WHITE':  (240, 240, 240),  'SILVER': (180, 180, 200),
-    'UNKNOWN':(80,  80,  80),
+    'GRAY':   (140, 140, 140)
 }
 
 
@@ -195,6 +194,42 @@ class BandReader:
     _FIRST_4B = {'BROWN', 'ORANGE', 'YELLOW'}
     _FIRST_5B = {'BROWN', 'YELLOW', 'BLUE', 'WHITE', 'GRAY'}
 
+    # Rule-based constraints: (check_pos, trigger_color, constraint_pos, allowed_colors)
+    # Applied as pre-filter before voting — combos violating a triggered rule are excluded
+    _5B_RULES = [
+        (0, 'BROWN',  1, {'BLACK'}),
+        (0, 'BLUE',   1, {'GRAY'}),
+        (0, 'WHITE',  1, {'BROWN'}),
+        (0, 'GRAY',   1, {'RED'}),
+        (1, {'BLACK', 'GRAY'},  3, {'BROWN'}),
+        (1, 'RED',    3, {'BLACK'}),
+        (1, 'BROWN',  3, {'BLACK', 'SILVER'}),
+    ]
+    _4B_RULES = [
+        (0, 'ORANGE', 1, {'WHITE'}),
+        (0, 'YELLOW', 1, {'VIOLET'}),
+        (0, 'BROWN',  1, {'BLACK'}),
+        (1, 'WHITE',  2, {'BROWN'}),                      # pos2 = multiplier
+        (1, 'VIOLET', 2, {'BROWN', 'RED'}),
+        (1, 'BLACK',  2, {'BROWN', 'RED', 'ORANGE'}),
+    ]
+
+    def _filter_combos_by_rules(self, combos, detected_colors: list, n_bands: int):
+        """กรอง combo ที่ขัดกับ rule ที่ triggered โดย detected colors ก่อน vote"""
+        rules = self._5B_RULES if n_bands == 5 else self._4B_RULES
+        filtered = []
+        for combo_colors, meta in combos:
+            valid = True
+            for check_pos, trigger, constraint_pos, allowed in rules:
+                if check_pos < len(detected_colors) and detected_colors[check_pos] == trigger:
+                    if constraint_pos < len(combo_colors) and combo_colors[constraint_pos] not in allowed:
+                        valid = False
+                        break
+            if valid:
+                filtered.append((combo_colors, meta))
+        # fallback: ถ้า filter ออกหมดให้ใช้ทุก combo (กันกรณี detect ผิดทุกแถบ)
+        return filtered if filtered else list(combos)
+
     def _apply_count_hint(self, bands: List[Dict],
                           hint: int) -> List[Dict]:
         if not bands or len(bands) < 2:
@@ -236,6 +271,10 @@ class BandReader:
         combos = self._5B_COMBOS if n_bands == 5 else self._4B_COMBOS
         if not bands or not combos:
             return bands, None, '?%'
+
+        # กรอง combo ด้วย rule ก่อน vote
+        detected_colors = [b['color'] for b in bands]
+        combos = self._filter_combos_by_rules(combos, detected_colors, n_bands or len(bands))
 
         # score เฉพาะตำแหน่งที่มี band จริง — ไม่ reject ถ้าจำนวนไม่ตรง
         n_score      = min(len(bands), n_bands) if n_bands else len(bands)
@@ -419,6 +458,13 @@ class BandReader:
             # Use pixels within ±12° of peak for S/V estimation
             near   = np.abs(flat[:, 0] - peak_h) < 12
             grp    = flat[near] if near.sum() > 3 else flat
+            # สำหรับแถบที่มี hue ชัด (chromatic) กรองเฉพาะ pixel S สูง
+            # เพื่อลด body bleed จากลำตัวน้ำเงิน/เบจที่ S ต่ำกว่าแถบจริง
+            if peak_h > 10 and len(grp) > 6:
+                sat_thr = float(np.percentile(grp[:, 1], 35))
+                vivid   = grp[grp[:, 1] >= sat_thr]
+                if len(vivid) >= 3:
+                    grp = vivid
             mean_hsv = (
                 peak_h,
                 float(np.median(grp[:, 1])),

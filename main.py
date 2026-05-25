@@ -23,7 +23,8 @@ from config.configs import (BG, GREEN, RED, DIM,
                             POSE_BACKEND, POSE_MODEL, POSE_CONF, POSE_IOU,
                             CLS_BACKEND, CLS_MODEL, CLS_DEVICE,
                             CAMERA_ID, CAMERA_WIDTH, CAMERA_HEIGHT,
-                            CLS_RESISTOR, CLS_WIRE)
+                            CLS_RESISTOR, CLS_WIRE,
+                            DEBUG_CROPS, DEBUG_CROP_DIR)
 import config.configs as configs
 
 
@@ -92,6 +93,7 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
 
         self._topo_votes  = collections.deque(maxlen=5)   # majority-vote circuit type
         self._stable_info = {'type': '—', 'total_ohms': 0.0, 'formula': '', 'extra': {}}
+        self._last_aruco_ok = False   # track board detection state for cache reset
 
         self._fps_times = collections.deque(maxlen=30)
         self._padded    = None
@@ -148,7 +150,7 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
 
     def _start_band_worker(self, warped_snap, kp_snap, cls_snap):
         VOTE_SIZE   = 10
-        VOTE_THRESH = 6
+        VOTE_THRESH = 4   # ต้องการ 4/10 (40%) เพราะ crop=None เกิดบ่อย
         BAD = {"?", "ERR", "Unknown", "Read Error", "Calc Error", "Error"}
 
         def _kp_center(kp_arr):
@@ -157,6 +159,12 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
                 return None
             return (sum(p[0] for p in pts) / len(pts),
                     sum(p[1] for p in pts) / len(pts))
+
+        _debug_dir = None
+        if DEBUG_CROPS:
+            import os
+            _debug_dir = DEBUG_CROP_DIR
+            os.makedirs(_debug_dir, exist_ok=True)
 
         def worker():
             for idx, cls_id in enumerate(cls_snap):
@@ -173,6 +181,19 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
                         cls_name, conf = self.classifier.predict(crop)
                         res = _cls_to_ohm_str(cls_name)
                         print(f"[Cls{idx}] → {cls_name} ({conf:.2f}) → {res}")
+
+                        if _debug_dir is not None:
+                            ts   = int(time.perf_counter() * 1000) % 1_000_000
+                            stem = f"{ts:06d}_r{idx}_{cls_name}_{int(conf*100)}pct"
+                            # raw crop
+                            cv2.imwrite(f"{_debug_dir}/{stem}_raw.jpg", crop)
+                            # annotated: band scan overlay
+                            try:
+                                band_label, bands, _ = self.band_reader.calculate(crop)
+                                annot = self.band_reader.annotate_crop(crop, bands, band_label)
+                                cv2.imwrite(f"{_debug_dir}/{stem}_annot.jpg", annot)
+                            except Exception:
+                                pass
                     else:
                         res = "?"
                         print(f"[Cls{idx}] crop=None")
@@ -184,8 +205,9 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
                 buf.append(res)
                 print(f"[Vote{idx}] buf={list(buf)}")
 
-                winner, freq = Counter(buf).most_common(1)[0]
-                if freq >= VOTE_THRESH and winner not in BAD:
+                valid_votes = [(v, f) for v, f in Counter(buf).most_common() if v not in BAD]
+                if valid_votes and valid_votes[0][1] >= VOTE_THRESH:
+                    winner = valid_votes[0][0]
                     self._ohm_cache[idx]   = winner
                     self._ohm_numeric[idx] = _parse_ohms(winner)
                 elif all(r in BAD for r in buf):
@@ -280,6 +302,18 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
             return
 
         success, base, results = pkg
+
+        # ── ล้าง cache ทันทีที่ board หาย (True→False) ─────────────────────
+        # ป้องกัน vote เก่าจากตำแหน่งบอร์ดเดิมปนกับ vote ใหม่หลัง re-detect
+        if self._last_aruco_ok and not success:
+            self._ohm_cache.clear()
+            self._ohm_votes.clear()
+            self._ohm_numeric.clear()
+            self._kp_smooth.clear()
+            self._topo_votes.clear()
+            self._stable_info = {'type': '—', 'total_ohms': 0.0, 'formula': '', 'extra': {}}
+            self._update_circuit_ui(self._stable_info)
+        self._last_aruco_ok = success
 
         # Trigger classification เมื่อมี resistor detection (class 0)
         has_resistor = any(int(c) == CLS_RESISTOR for c in results.class_ids)
@@ -397,7 +431,7 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
         self.circuit_type_lbl.config(text=t, fg=color)
         self.circuit_formula_lbl.config(text=info.get('formula', ''))
 
-        if t == 'Wheatstone Bridge' and extra.get('balanced') is not None:
+        if t in ('Wheatstone Bridge', 'Wheatstone Bridge (5R)') and extra.get('balanced') is not None:
             bal       = extra['balanced']
             bal_color = '#4ade80' if bal else '#f87171'
             bal_text  = '[OK] Balanced' if bal else '[!!] Unbalanced'
@@ -406,7 +440,7 @@ class OhmVisionApp(UIBuilderMixin, CallbackMixin):
                 if   req >= 1e6: r_str = f"{req/1e6:.2f} MOhms"
                 elif req >= 1e3: r_str = f"{req/1e3:.2f} kOhms"
                 else:             r_str = f"{req:.1f} Ohms"
-                bal_text += f"  Req={r_str}"
+                bal_text += f"\nRtotal={r_str}"
             self.circuit_ohms_lbl.config(text=bal_text, fg=bal_color)
         elif ohms > 0:
             if   ohms >= 1e6: s = f"= {ohms/1e6:.2f} MOhms"

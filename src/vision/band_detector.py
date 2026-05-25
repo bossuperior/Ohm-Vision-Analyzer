@@ -111,7 +111,9 @@ class BandDetector:
     def detect_bands_adaptive(self, roi):
         """
         Adaptive threshold + connected components บน horizontal crop.
-        แถบสี = แถบมืดบน body สว่าง → BINARY_INV → white blobs ที่เป็น vertical strip.
+        รองรับทั้ง body สว่าง (beige) และ body มืด (น้ำเงิน):
+          - Primary   : BINARY_INV — แถบมืดบน body สว่าง
+          - Secondary : BINARY     — แถบสว่างบน body น้ำเงิน/มืด
         """
         h, w = roi.shape[:2]
 
@@ -123,44 +125,53 @@ class BandDetector:
         gray    = cv2.cvtColor(center, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (5, 5), 2)
 
-        block = max(11, int(w * 0.15)) | 1
-        thresh = cv2.adaptiveThreshold(
-            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV, block, 4)
-
-        # Open: ต้องพาดตลอด 60% ของความสูง center strip
-        k_open = np.ones((max(3, int(ch * 0.60)), 1), np.uint8)
-        mask = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, k_open)
-
+        block   = max(11, int(w * 0.15)) | 1
+        k_open  = np.ones((max(3, int(ch * 0.60)), 1), np.uint8)
         k_close = np.ones((1, max(3, int(w * 0.04))), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close, iterations=2)
-
         edge_guard = max(4, int(w * 0.09))
-        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(
-            mask, connectivity=8)
+        min_gap    = max(4, int(w * 0.06))
 
-        centers = []
-        for i in range(1, num_labels):
-            bx, _, bw, bh, _ = stats[i]
-            cx = bx + bw // 2
-            if (bh >= ch * 0.50 and bw <= w * 0.35 and
-                    edge_guard <= cx <= w - edge_guard):
-                centers.append({'x': cx, 'w': bw})
+        def _extract(thresh_img):
+            m = cv2.morphologyEx(thresh_img, cv2.MORPH_OPEN, k_open)
+            m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k_close, iterations=2)
+            n, _, st, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+            out = []
+            for i in range(1, n):
+                bx, _, bw, bh, _ = st[i]
+                cx = bx + bw // 2
+                if bh >= ch * 0.50 and bw <= w * 0.35 and edge_guard <= cx <= w - edge_guard:
+                    out.append({'x': cx, 'w': bw})
+            return sorted(out, key=lambda k: k['x'])
 
-        centers.sort(key=lambda k: k['x'])
+        def _merge(cs):
+            merged = []
+            for c in cs:
+                if merged and c['x'] - merged[-1]['x'] < min_gap:
+                    if c['w'] > merged[-1]['w']:
+                        merged[-1] = c
+                else:
+                    merged.append(c)
+            return merged
 
-        # Merge bands ที่อยู่ใกล้กันเกินไป (< 6% width) → เลือกอันที่กว้างกว่า
-        min_gap = max(4, int(w * 0.06))
-        merged  = []
-        for c in centers:
-            if merged and c['x'] - merged[-1]['x'] < min_gap:
-                if c['w'] > merged[-1]['w']:
-                    merged[-1] = c
-            else:
-                merged.append(c)
-        centers = merged
+        # ── Primary: dark bands on bright body ───────────────────────────────
+        thresh_inv = cv2.adaptiveThreshold(blurred, 255,
+                         cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, block, 4)
+        centers = _merge(_extract(thresh_inv))
 
-        # Cap 5 bands — ถ้ายังเกิน เก็บเฉพาะอันที่กว้างที่สุด (contrast มากสุด)
+        # ── Secondary: bright bands on dark/blue body ─────────────────────────
+        # trigger เมื่อหาได้น้อยกว่า 3 band หรือ body มืด (median gray < 140)
+        body_brightness = float(np.median(
+            blurred[int(ch * 0.1):int(ch * 0.9), int(w * 0.2):int(w * 0.8)]))
+        if len(centers) < 3 or body_brightness < 140:
+            thresh_fwd = cv2.adaptiveThreshold(blurred, 255,
+                             cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block, 4)
+            extra_raw = _extract(thresh_fwd)
+            extra = [c for c in extra_raw
+                     if not any(abs(c['x'] - e['x']) < min_gap for e in centers)]
+            if extra:
+                centers = _merge(sorted(centers + extra, key=lambda k: k['x']))
+
+        # Cap 5 bands — เก็บเฉพาะอันที่กว้างที่สุด (contrast มากสุด)
         if len(centers) > 5:
             centers = sorted(centers, key=lambda k: -k['w'])[:5]
             centers.sort(key=lambda k: k['x'])

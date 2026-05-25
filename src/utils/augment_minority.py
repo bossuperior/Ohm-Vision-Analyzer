@@ -9,10 +9,10 @@ import albumentations as A
 from pathlib import Path
 
 
-TARGET = 100
+TARGET = 180  # ตั้งให้ใกล้เคียง class ที่น้อยที่สุดในกลุ่มอื่น (390R_5pct, 100k_1pct อยู่ที่ ~168)
 
 # Classes to augment: folder name → current count (auto-detected at runtime)
-MINORITY_CLASSES = ['4k7_5pct', '820R_1pct']
+MINORITY_CLASSES = ['4k7_5pct']  # 820R_1pct มี 190 ภาพแล้ว ไม่ใช่ minority
 
 CROPS_DIR = Path('data/processed/crops')
 

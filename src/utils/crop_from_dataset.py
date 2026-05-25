@@ -20,7 +20,7 @@ def _affine_crop(img: np.ndarray, p0: np.ndarray, p1: np.ndarray) -> np.ndarray 
 
     cx, cy   = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
     cos_a, sin_a = dx / length, dy / length
-    perp_pad = int(np.clip(length * 0.35, 25, 60))
+    perp_pad = int(np.clip(length * 0.35, 25, 40))
 
     out_w = int(length) + 24
     out_h = perp_pad * 2
@@ -36,6 +36,14 @@ def _affine_crop(img: np.ndarray, p0: np.ndarray, p1: np.ndarray) -> np.ndarray 
 
 
 _CLAHE = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(4, 4)) # อัปเกรด ClipLimit เพิ่ม Contrast แถบสีให้ชัดขึ้น
+
+
+def _to_landscape(img: np.ndarray) -> np.ndarray:
+    """หมุน 90° CW ถ้าภาพออกมาแนวตั้ง — ใช้ทั้ง training และ inference ให้สอดคล้องกัน"""
+    if img is not None and img.shape[0] > img.shape[1]:
+        return cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+    return img
+
 
 def _mask_body(crop: np.ndarray) -> np.ndarray | None:
     if crop is None or crop.size == 0:
@@ -53,47 +61,91 @@ def _mask_body(crop: np.ndarray) -> np.ndarray | None:
     valid_vals = blur[valid]
     if len(valid_vals) < 50:
         return None
-        
-    # 3. ใช้ Otsu Threshold แยกตัวต้านทานออกจากฉากหลัง
-    thr, _ = cv2.threshold(valid_vals.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    _, binary = cv2.threshold(blur, int(thr), 255, cv2.THRESH_BINARY_INV)
-    binary[~valid] = 0   
 
-    # 4. หาขอบเขตแกน X (สแกนแนวตั้งเพื่อตัดลวดขาเหล็กซ้ายขวาทิ้ง)
-    col_cover = binary.sum(axis=0) / 255.0   
-    body_thr  = h * 0.25  # พิกเซลตัวต้านทานต้องหนาอย่างน้อย 25% ของความสูง
-    is_body   = col_cover >= body_thr
+    # 3. Binary mask: เทียบกับสี background จาก margin บน/ล่างของ affine crop
+    # (ดีกว่า Otsu เพราะจับ body ceramic สีอ่อนได้ด้วย ไม่ใช่แค่แถบสีเข้ม)
+    marg = max(4, h // 7)
+    bg_strip = np.concatenate([blur[:marg, :].ravel(), blur[-marg:, :].ravel()])
+    bg_valid  = bg_strip[bg_strip > 8]
+    if len(bg_valid) > 20:
+        bg_val = float(np.median(bg_valid))
+        diff   = np.abs(blur.astype(np.float32) - bg_val)
+        binary = np.where((diff > 18) & valid, np.uint8(255), np.uint8(0))
+    else:                                              # fallback: Otsu ถ้า margin ว่าง
+        thr, _ = cv2.threshold(valid_vals.reshape(-1, 1), 0, 255,
+                               cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        _, binary = cv2.threshold(blur, int(thr), 255, cv2.THRESH_BINARY_INV)
+        binary[~valid] = 0
 
-    if not is_body.any():
-        is_body = col_cover >= h * 0.10 # ลดเกณฑ์ถ้าตัวเล็ก
-    if not is_body.any():
+    # 4. Opening 5×5 — ลบ noise เล็ก ≤4px (รูบอร์ด, ลวดบางมาก)
+    k5 = np.ones((5, 5), np.uint8)
+    binary_clean = cv2.morphologyEx(binary, cv2.MORPH_OPEN, k5)
+    if cv2.countNonZero(binary_clean) < 50:
+        binary_clean = binary
+
+    # 5. Contour → Y range เท่านั้น (reliable เพราะ body อยู่กลาง crop แนวตั้ง)
+    contours, _ = cv2.findContours(binary_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
         return None
 
-    xs = np.where(is_body)[0]
-    x0 = max(0, int(xs[0]) - 3) # เผื่อขอบ (Padding) ซ้าย 3 พิกเซล
-    x1 = min(w, int(xs[-1]) + 4) # เผื่อขอบ (Padding) ขวา 4 พิกเซล
+    img_cx, img_cy = w / 2.0, h / 2.0
+    # กรอง: กว้าง ≥ 8px และ สูง ≥ 10px (รูบอร์ด ~5px จะตกออก)
+    min_ch = max(10, h // 6)
+    valid_cs = [(c, cv2.boundingRect(c)) for c in contours
+                if cv2.boundingRect(c)[2] >= 8 and cv2.boundingRect(c)[3] >= min_ch]
+    if not valid_cs:
+        # fallback: ลดเกณฑ์ถ้าไม่เจออะไรเลย
+        valid_cs = [(c, cv2.boundingRect(c)) for c in contours
+                    if cv2.boundingRect(c)[2] >= 8 and cv2.boundingRect(c)[3] >= 5]
+    if not valid_cs:
+        return None
 
-    # 5. หาขอบเขตแกน Y (สแกนแนวนอนเพื่อตัดขอบบนล่างทิ้ง)
-    row_cover = binary[:, x0:x1].sum(axis=1) / 255.0   
-    row_thr   = (x1 - x0) * 0.10
-    is_row    = row_cover >= row_thr
+    best_c, best_rect = min(valid_cs, key=lambda t: (
+        np.hypot(t[1][0] + t[1][2] / 2 - img_cx,
+                 t[1][1] + t[1][3] / 2 - img_cy)
+        - cv2.contourArea(t[0]) * 0.05
+    ))
 
-    if is_row.any():
-        ys = np.where(is_row)[0]
-        y0 = max(0, int(ys[0]) - 3)
-        y1 = min(h, int(ys[-1]) + 4)
-    else:
-        y0, y1 = 0, h
+    # รวม Y range จากทุก contour ที่ overlap แนวตั้งกับ best
+    _, by, _, bh_c = best_rect
+    ry0 = by; ry1 = by + bh_c
+    for _, (cx2, cy2, cw2, ch2) in valid_cs:
+        if not (cy2 + ch2 < ry0 - 4 or cy2 > ry1 + 4):
+            ry0 = min(ry0, cy2);  ry1 = max(ry1, cy2 + ch2)
+    y0 = max(0, ry0 - 2);  y1 = min(h, ry1 + 2)
+    body_h = max(1, ry1 - ry0)
 
-    # 6. ครอปตัดเป็น "สี่เหลี่ยมเต็มใบ" (ไม่เจาะรูเนื้อข้างใน)
+    # 6. Column scan ภายใน Y strip — แยก body ออกจาก leads
+    # leads บาง ~5px ใน strip สูง 25px → coverage 20%; body เต็ม → 80-100%
+    # ใช้ threshold 50% → leads ตกออกเสมอ, body ผ่านเสมอ
+    strip     = binary_clean[ry0:ry1, :]
+    col_cover = strip.sum(axis=0) / 255.0
+    x0, x1 = 0, w
+    for thr_frac in [0.50, 0.35, 0.20, 0.10]:
+        is_body = col_cover >= body_h * thr_frac
+        if not is_body.any():
+            continue
+        xs   = np.where(is_body)[0]
+        # longest contiguous run (gap ≤ 15px รองรับช่องว่างระหว่าง band)
+        gaps = np.where(np.diff(xs) > 15)[0]
+        if len(gaps):
+            starts = np.concatenate([[xs[0]], xs[gaps + 1]])
+            ends   = np.concatenate([xs[gaps], [xs[-1]]])
+            best   = int(np.argmax(ends - starts))
+            rx0, rx1 = int(starts[best]), int(ends[best])
+        else:
+            rx0, rx1 = int(xs[0]), int(xs[-1])
+        x0 = max(0, rx0 - 2);  x1 = min(w, rx1 + 2)
+        break
+
     tight = crop[y0:y1, x0:x1]
 
-    # 7. เช็กและหมุนเป็นแนวนอน
+    # 7. Portrait safety
     th, tw = tight.shape[:2]
-    if tw > 0 and th > tw * 1.05:
-        tight = cv2.rotate(tight, cv2.ROTATE_90_CLOCKWISE)
+    if tw > 0 and th > tw:
+        tight = crop[y0:y1, :]
 
-    return tight
+    return _to_landscape(tight)
 
 
 def _inv_letterbox_kpts(kpts_flat: list, proc_w: int, proc_h: int,
@@ -110,7 +162,8 @@ def _inv_letterbox_kpts(kpts_flat: list, proc_w: int, proc_h: int,
     return out
 
 
-_MIN_CROP_W = 50   # pixels — crop เล็กกว่านี้ไม่มีรายละเอียดแถบสีเพียงพอ
+_MIN_CROP_W   = 50   # pixels — crop เล็กกว่านี้ไม่มีรายละเอียดแถบสีเพียงพอ
+_MAX_CROP_RATIO = 6.0  # w/h — กว้างกว่านี้ = keypoint อยู่ที่ปลายลวด ไม่ใช่ขอบ body
 
 
 def _postprocess_crop(crop: np.ndarray) -> np.ndarray | None:
@@ -267,9 +320,15 @@ def crop_body_for_classifier(img: np.ndarray,
     crop = _mask_body(crop)
     if crop is None:
         return None
-    if crop.shape[1] < _MIN_CROP_W:
+    h_c, w_c = crop.shape[:2]
+    if w_c < _MIN_CROP_W:
         return None
-    return _postprocess_crop(crop)
+    if h_c > 0 and w_c / h_c > _MAX_CROP_RATIO:  # keypoint อยู่ปลายลวด ไม่ใช่ body
+        return None
+    crop = _postprocess_crop(crop)
+    if crop is None:
+        return None
+    return _to_landscape(crop)
 
 
 def main():

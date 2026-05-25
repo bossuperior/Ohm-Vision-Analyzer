@@ -21,7 +21,7 @@ DEFAULTS = {
 
 # ── Pose model ────────────────────────────────────────────────────────────────
 POSE_BACKEND = 'yolo'
-POSE_MODEL   = 'models/Pose Model/Yolo_v8n/Yolo_v8n_pose_weights.onnx'
+POSE_MODEL   = 'models/Pose Model/Yolo_v8s/Yolo_v8s_pose_weights.onnx'
 POSE_CONF    = 0.5
 POSE_IOU     = 0.45
 
@@ -38,6 +38,10 @@ CAMERA_HEIGHT = 720
 # ── Pose model class IDs (2-class: resistor=0, wire=1) ───────────────────────
 CLS_RESISTOR = 0   # resistor → crop ระหว่าง 2 keypoints → classify ค่าความต้านทาน + topology
 CLS_WIRE     = 1   # wire → topology เท่านั้น (node merging)
+
+# ── Debug ─────────────────────────────────────────────────────────────────────
+DEBUG_CROPS     = True               # บันทึก crop + annotated debug image ทุกครั้งที่ classify
+DEBUG_CROP_DIR  = "debug/crops"      # folder ที่บันทึก (สร้างอัตโนมัติ)
 
 # Theme colors (can be overridden by config)
 BG       = "#1a1a2e"
