@@ -222,6 +222,17 @@ class CircuitAnalyzer:
             return 0.0, fallback
 
     # ── Wheatstone Bridge ──────────────────────────────────────────────────────
+    @staticmethod
+    def _parse_node_zone_col(node: str):
+        """Parse 'Node_Top_10' → ('Top', 10), or return None."""
+        if node.startswith('Node_Top_'):
+            try: return ('Top', int(node[9:]))
+            except ValueError: return None
+        if node.startswith('Node_Bottom_'):
+            try: return ('Bottom', int(node[12:]))
+            except ValueError: return None
+        return None
+
     def _calc_wheatstone(self, components: List[Dict],
                          suffix: str) -> Tuple[float, str, dict]:
         """
@@ -233,14 +244,37 @@ class CircuitAnalyzer:
         """
         cycle = self._order_cycle(components)
         if cycle is None:
-            # nodes ≠ 4 (keypoint misalignment) → nodal analysis fallback
-            known = [c for c in components if c.get('ohms', 0.0) > 0]
-            n_known = len(known)
-            if n_known < len(components):
-                return 0.0, f'{n_known}/4 resistors known{suffix}', {}
-            total, formula = self._calc_nodal(components, known, suffix)
-            extra = {'balanced': None, 'req_ac': total, 'req_bd': 0.0}
-            return total, formula, extra
+            # nodes ≠ 4: try to heal a 1-column keypoint split
+            # A split junction creates exactly 2 degree-1 nodes in the same zone, ≤2 cols apart
+            degree: Dict[str, int] = defaultdict(int)
+            for c in components:
+                degree[c['node1']] += 1
+                degree[c['node2']] += 1
+            deg1 = [n for n, d in degree.items() if d == 1]
+            healed = None
+            if len(deg1) == 2:
+                p1 = self._parse_node_zone_col(deg1[0])
+                p2 = self._parse_node_zone_col(deg1[1])
+                if p1 and p2 and p1[0] == p2[0] and abs(p1[1] - p2[1]) <= 2:
+                    src, dst = deg1[1], deg1[0]
+                    merged = [{**c,
+                               'node1': dst if c['node1'] == src else c['node1'],
+                               'node2': dst if c['node2'] == src else c['node2']}
+                              for c in components]
+                    trial = self._order_cycle(merged)
+                    if trial is not None:
+                        cycle, healed = trial, merged
+            if healed is not None:
+                components = healed
+            else:
+                # Fallback: nodal analysis
+                known = [c for c in components if c.get('ohms', 0.0) > 0]
+                n_known = len(known)
+                if n_known < len(components):
+                    return 0.0, f'{n_known}/4 resistors known{suffix}', {}
+                total, formula = self._calc_nodal(components, known, suffix)
+                extra = {'balanced': None, 'req_ac': total, 'req_bd': 0.0}
+                return total, formula, extra
 
         def get_ohms(n1, n2):
             for c in components:
