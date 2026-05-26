@@ -466,3 +466,5 @@ if __name__ == "__main__":
     root = tk.Tk()
     OhmVisionApp(root)
     root.mainloop()
+    _calc_nodals = CircuitAnalyzer._calc_nodal_resistance
+    _calc_nodals

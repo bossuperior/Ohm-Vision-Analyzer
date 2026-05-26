@@ -53,6 +53,10 @@ class CircuitAnalyzer:
             return {'type': 'Single', 'total_ohms': ohms,
                     'formula': _fmt(ohms) if ohms > 0 else '?', 'extra': {}}
 
+        # Pre-heal: merge split-node junction caused by keypoint noise (4-component bridge)
+        if len(components) == 4:
+            components = self._heal_split_node(components)
+
         topo  = self._topology(components)
         known = [c for c in components if c.get('ohms', 0.0) > 0]
         total, formula, extra = self._calc(topo, known, components)
@@ -88,14 +92,14 @@ class CircuitAnalyzer:
         if len(components) == 5 and n_nodes == 4 and sorted(degree.values()) == [2, 2, 3, 3]:
             return 'Wheatstone Bridge (5R)'
 
-        # Wheatstone Bridge (ผ่อนเงื่อนไข) — 4 ตัวต้านทาน
-        # รองรับ keypoint ผิดตำแหน่งหลายกรณี: split-node, merge-node, extra junction
-        if len(components) == 4 and max_deg <= 4 and 3 <= n_nodes <= 6:
-            return 'Wheatstone Bridge'
-
-        # Series: ไม่มี branching, มี terminal 2 จุดพอดี
+        # Series: ตรวจก่อน bridge เพื่อป้องกัน chain 5-node ถูก mislabel เป็น bridge
         if max_deg <= 2 and n_term == 2:
             return 'Series'
+
+        # Wheatstone Bridge (ผ่อนเงื่อนไข) — 4 ตัวต้านทาน
+        # รองรับ keypoint ผิดตำแหน่ง: merge-node (3 nodes), extra junction
+        if len(components) == 4 and max_deg <= 4 and 3 <= n_nodes <= 6:
+            return 'Wheatstone Bridge'
 
         return 'Mixed'
 
@@ -217,6 +221,7 @@ class CircuitAnalyzer:
                 return 0.0, fallback
             formula = (', '.join(_fmt(v) for v in vals)
                        + f' → Rtotal = {_fmt(total)} Ohm{suffix}')
+            print(f"[Graph G] nodes={list(G.nodes())}, edges={list(G.edges(data=True))}")
             return total, formula
         except Exception:
             return 0.0, fallback
@@ -233,6 +238,24 @@ class CircuitAnalyzer:
             except ValueError: return None
         return None
 
+    def _heal_split_node(self, components: List[Dict]) -> List[Dict]:
+        """Merge 2 degree-1 nodes in the same zone ≤2 cols apart (keypoint noise on bridge junction)."""
+        degree: Dict[str, int] = defaultdict(int)
+        for c in components:
+            degree[c['node1']] += 1
+            degree[c['node2']] += 1
+        deg1 = [n for n, d in degree.items() if d == 1]
+        if len(deg1) == 2:
+            p1 = self._parse_node_zone_col(deg1[0])
+            p2 = self._parse_node_zone_col(deg1[1])
+            if p1 and p2 and p1[0] == p2[0] and abs(p1[1] - p2[1]) <= 2:
+                src, dst = deg1[1], deg1[0]
+                return [{**c,
+                         'node1': dst if c['node1'] == src else c['node1'],
+                         'node2': dst if c['node2'] == src else c['node2']}
+                        for c in components]
+        return components
+
     def _calc_wheatstone(self, components: List[Dict],
                          suffix: str) -> Tuple[float, str, dict]:
         """
@@ -244,37 +267,14 @@ class CircuitAnalyzer:
         """
         cycle = self._order_cycle(components)
         if cycle is None:
-            # nodes ≠ 4: try to heal a 1-column keypoint split
-            # A split junction creates exactly 2 degree-1 nodes in the same zone, ≤2 cols apart
-            degree: Dict[str, int] = defaultdict(int)
-            for c in components:
-                degree[c['node1']] += 1
-                degree[c['node2']] += 1
-            deg1 = [n for n, d in degree.items() if d == 1]
-            healed = None
-            if len(deg1) == 2:
-                p1 = self._parse_node_zone_col(deg1[0])
-                p2 = self._parse_node_zone_col(deg1[1])
-                if p1 and p2 and p1[0] == p2[0] and abs(p1[1] - p2[1]) <= 2:
-                    src, dst = deg1[1], deg1[0]
-                    merged = [{**c,
-                               'node1': dst if c['node1'] == src else c['node1'],
-                               'node2': dst if c['node2'] == src else c['node2']}
-                              for c in components]
-                    trial = self._order_cycle(merged)
-                    if trial is not None:
-                        cycle, healed = trial, merged
-            if healed is not None:
-                components = healed
-            else:
-                # Fallback: nodal analysis
-                known = [c for c in components if c.get('ohms', 0.0) > 0]
-                n_known = len(known)
-                if n_known < len(components):
-                    return 0.0, f'{n_known}/4 resistors known{suffix}', {}
-                total, formula = self._calc_nodal(components, known, suffix)
-                extra = {'balanced': None, 'req_ac': total, 'req_bd': 0.0}
-                return total, formula, extra
+            # nodes ≠ 4 (merge-node / extra junction) → nodal fallback
+            known = [c for c in components if c.get('ohms', 0.0) > 0]
+            n_known = len(known)
+            if n_known < len(components):
+                return 0.0, f'{n_known}/4 resistors known{suffix}', {}
+            total, formula = self._calc_nodal(components, known, suffix)
+            extra = {'balanced': None, 'req_ac': total, 'req_bd': 0.0}
+            return total, formula, extra
 
         def get_ohms(n1, n2):
             for c in components:
